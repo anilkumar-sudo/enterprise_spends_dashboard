@@ -9,8 +9,8 @@ Deploy the latest authenticated Cult Enterprise B2B Spend Dashboard to Cloudflar
 - Latest production package: `Final B2B Dashboard - Production Assets.zip`
 - GitHub repository: `https://github.com/cultsport/cult-enterprise-marketing.git`
 - Target deployment branch: `codex/pages-final-dashboard`
-- Current Cloudflare service: `cult-enterprise-marketing`
-- Existing URL: `https://cult-enterprise-marketing.cultfit.workers.dev/`
+- Current Cloudflare service: `b2b-enterprise-spends-dashboard`
+- Existing URL: `https://b2b-enterprise-spends-dashboard.cultfit.workers.dev/`
 - Preferred custom URL: `b2b-spend-dashboard.cultfit.in`
 
 As of August 7, 2026, unauthenticated requests to both `/` and `/api` return `403`. This confirms Cloudflare Access is active, but the currently deployed code version must be verified after signing in or redeploying the branch above.
@@ -19,22 +19,14 @@ The local production package contains Anil's editor access update. Before deploy
 
 ## Access model
 
-Cloudflare Access must authenticate users and forward the authenticated email in the `cf-access-authenticated-user-email` request header.
+The Worker uses Google OAuth and accepts only verified `@curefit.com` accounts. Sessions are stored in the `ACCESS_STORE` KV namespace. Cloudflare Access headers remain supported for local/managed-identity testing.
 
-Viewer access is allowed for authenticated users on these company domains:
+The initial administrators are:
 
-- `@curefit.com`
-- `@cultfit.in`
-
-Approved editors:
-
-- `nikhil.zutshi@curefit.com`
-- `divya.agarwal@curefit.com`
-- `alvina.davidson@curefit.com`
-- `arjit.shukla@curefit.com`
 - `anil.kumar@curefit.com`
+- `nikhil.zutshi@curefit.com`
 
-Viewers can access Overview and all Spend Category tabs. Spend Forecast and every Operations tab are editor-only. The Worker also rejects viewer write requests server-side.
+Administrators can add, change, and remove approved users from the Access Management tab. Roles are `admin`, `editor`, and `viewer`; viewers can access Overview and Spend Category tabs, editors can access operations, and admins can also manage access. The Worker enforces the same permissions server-side.
 
 ## Production files
 
@@ -76,9 +68,10 @@ Before deploying, confirm:
 
 1. Wrangler is authenticated to the `cultfit` Cloudflare account.
 2. The Google service-account secrets are configured and the source Sheet is shared with the service-account email.
-3. The production source is `codex/pages-final-dashboard`, with `cloudflare-worker` as the deployment root when using Git integration.
-4. Cloudflare Access protects both the `workers.dev` URL and any custom hostname.
-5. The Access policy allows the two company domains and blocks external identities.
+3. Set the Google OAuth web-client secrets: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, and `GOOGLE_OAUTH_REDIRECT_URI`.
+4. Register `https://b2b-enterprise-spends-dashboard.cultfit.workers.dev/auth/callback` as an authorized redirect URI in Google Cloud.
+5. The production source is `codex/pages-final-dashboard`, with `cloudflare-worker` as the deployment root when using Git integration.
+6. The `ACCESS_STORE` KV binding is present and Cloudflare Access, if enabled, forwards the authenticated email header.
 
 ## Custom URL
 
@@ -86,19 +79,18 @@ Attach `b2b-spend-dashboard.cultfit.in` as a Worker custom domain or route, then
 
 ## Required verification
 
-1. Open `/` while signed in as `anil.kumar@curefit.com`; the header must show `Editor access`.
-2. Confirm Anil can see Spend Forecast and all Operations tabs.
-3. Add a temporary test spend, verify it persists after refresh, and then remove it.
-4. Open `/` as a non-editor company user; the header must show `View only`.
-5. Confirm a viewer cannot see Spend Forecast or Operations tabs and cannot submit a write request.
-6. Confirm an external email cannot access the application.
-7. Open `/api` while authenticated and confirm a JSON response rather than `404`.
-8. Confirm the Cult for Corporates logo appears correctly in the sidebar with no background patch.
-9. Confirm the overview shows 120 transactions, ₹3.74 crore total spend, and ₹11.39 crore effective budget.
+1. Sign in through Google as `anil.kumar@curefit.com`; the header must show `Admin access`.
+2. Confirm both initial admins can see and use Access Management.
+3. Add a temporary viewer and editor, verify their tab visibility, then remove them.
+4. Confirm an unlisted `@curefit.com` account receives access pending/denied messaging.
+5. Confirm an external email cannot access the application.
+6. Open `/api` while authenticated and confirm a JSON response rather than `404`.
+7. Confirm the Cult for Corporates logo appears correctly in the sidebar with no background patch.
+8. Confirm the overview shows 120 transactions, ₹3.74 crore total spend, and ₹11.39 crore effective budget.
 
 ## Known deployment dependency
 
-The application relies on Cloudflare Access for verified identity. Without the Access header, the dashboard safely treats the visitor as unauthorized and does not grant editor access.
+Google OAuth secrets and the `ACCESS_STORE` KV binding are required for production login and persistent role management. Without a valid Google OAuth configuration, the Worker shows a configuration error rather than granting access.
 
 ## Rollback
 

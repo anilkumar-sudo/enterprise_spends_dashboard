@@ -1,13 +1,12 @@
-const EDITOR_EMAILS = [
-  'nikhil.zutshi@curefit.com',
-  'divya.agarwal@curefit.com',
-  'alvina.davidson@curefit.com',
-  'arjit.shukla@curefit.com',
-  'anil.kumar@curefit.com'
+const DEFAULT_ACCESS = [
+  { email: 'anil.kumar@curefit.com', role: 'admin' },
+  { email: 'nikhil.zutshi@curefit.com', role: 'admin' }
 ];
-const VIEWER_DOMAINS = ['curefit.com', 'cultfit.in'];
-const EDITOR_TABS = ['overview', 'forecast', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events', 'spends', 'payments', 'vendors', 'budget'];
+const ALLOWED_DOMAIN = 'curefit.com';
+const ADMIN_TABS = ['overview', 'forecast', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events', 'spends', 'payments', 'vendors', 'budget', 'access'];
+const EDITOR_TABS = ADMIN_TABS.filter((tab) => tab !== 'access');
 const VIEWER_TABS = ['overview', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events'];
+const SESSION_TTL = 60 * 60 * 24 * 7;
 
 const INITIAL_STATE = __INITIAL_STATE__;
 const INDEX_HTML = __INDEX_HTML__;
@@ -199,26 +198,138 @@ function html(body, status = 200) {
   });
 }
 
-function getUserEmail(request) {
-  return (
-    request.headers.get('cf-access-authenticated-user-email') ||
-    request.headers.get('x-authenticated-user-email') ||
-    ''
-  ).trim().toLowerCase();
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
 }
 
-function getAuth(email) {
-  const domain = email.includes('@') ? email.split('@').pop() : '';
-  const canView = Boolean(email) && VIEWER_DOMAINS.includes(domain);
-  const canEdit = canView && EDITOR_EMAILS.includes(email);
+function getRedirectUri(request, env) {
+  return env.GOOGLE_OAUTH_REDIRECT_URI || `${new URL(request.url).origin}/auth/callback`;
+}
+
+function getSessionStore(env) {
+  return env.ACCESS_STORE && typeof env.ACCESS_STORE.get === 'function' ? env.ACCESS_STORE : null;
+}
+
+async function getAccessList(env) {
+  const store = getSessionStore(env);
+  if (!store) return structuredClone(DEFAULT_ACCESS);
+  const raw = await store.get('b2b:access:users');
+  if (!raw) {
+    await store.put('b2b:access:users', JSON.stringify(DEFAULT_ACCESS));
+    return structuredClone(DEFAULT_ACCESS);
+  }
+  try {
+    const users = JSON.parse(raw);
+    return Array.isArray(users) ? users : structuredClone(DEFAULT_ACCESS);
+  } catch {
+    return structuredClone(DEFAULT_ACCESS);
+  }
+}
+
+async function saveAccessList(env, users) {
+  const store = getSessionStore(env);
+  if (store) await store.put('b2b:access:users', JSON.stringify(users));
+}
+
+async function getSessionEmail(request, env) {
+  const trustedHeaderEmail = normalizeEmail(
+    request.headers.get('cf-access-authenticated-user-email') ||
+    request.headers.get('x-authenticated-user-email') || ''
+  );
+  if (trustedHeaderEmail) return trustedHeaderEmail;
+  const cookie = request.headers.get('cookie') || '';
+  const match = cookie.match(/(?:^|;\s*)b2b_session=([^;]+)/);
+  if (!match) return '';
+  const store = getSessionStore(env);
+  if (!store) return '';
+  const session = await store.get(`b2b:session:${decodeURIComponent(match[1])}`, 'json');
+  return normalizeEmail(session?.email);
+}
+
+async function getAuth(email, env) {
+  const normalized = normalizeEmail(email);
+  const domain = normalized.includes('@') ? normalized.split('@').pop() : '';
+  const users = await getAccessList(env);
+  const record = users.find((user) => normalizeEmail(user.email) === normalized);
+  const canView = Boolean(normalized) && domain === ALLOWED_DOMAIN && Boolean(record);
+  const role = canView ? record.role : '';
+  const isAdmin = role === 'admin';
+  const canEdit = canView && (role === 'editor' || isAdmin);
   return {
-    email,
+    email: normalized,
     domain,
+    role: canView ? role : 'restricted',
     canView,
-    role: canEdit ? 'editor' : 'viewer',
     canEdit,
-    visibleTabs: canEdit ? EDITOR_TABS : VIEWER_TABS
+    isAdmin,
+    visibleTabs: isAdmin ? ADMIN_TABS : canEdit ? EDITOR_TABS : canView ? VIEWER_TABS : []
   };
+}
+
+function redirect(url) {
+  return new Response(null, { status: 302, headers: { location: url, 'cache-control': 'no-store' } });
+}
+
+function loginUrl(request) {
+  return `/auth/login?returnTo=${encodeURIComponent(new URL(request.url).pathname)}`;
+}
+
+async function handleAuth(request, env, url) {
+  if (url.pathname === '/auth/login') {
+    if (!env.GOOGLE_OAUTH_CLIENT_ID) return html('<h1>Google login is not configured</h1><p>Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET in Worker secrets.</p>', 503);
+    const state = crypto.randomUUID();
+    const store = getSessionStore(env);
+    if (store) await store.put(`b2b:oauth:${state}`, JSON.stringify({ returnTo: url.searchParams.get('returnTo') || '/' }), { expirationTtl: 600 });
+    const params = new URLSearchParams({
+      client_id: env.GOOGLE_OAUTH_CLIENT_ID,
+      redirect_uri: getRedirectUri(request, env),
+      response_type: 'code',
+      scope: 'openid email profile',
+      access_type: 'online',
+      prompt: 'select_account',
+      state
+    });
+    return redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+  }
+
+  if (url.pathname === '/auth/callback') {
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    if (!code || !state || !env.GOOGLE_OAUTH_CLIENT_ID || !env.GOOGLE_OAUTH_CLIENT_SECRET) return html('<h1>Invalid Google login response</h1>', 400);
+    const store = getSessionStore(env);
+    const oauthState = store ? await store.get(`b2b:oauth:${state}`, 'json') : null;
+    if (store) await store.delete(`b2b:oauth:${state}`);
+    if (store && !oauthState) return html('<h1>Login expired</h1><p>Please try again.</p>', 400);
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ code, client_id: env.GOOGLE_OAUTH_CLIENT_ID, client_secret: env.GOOGLE_OAUTH_CLIENT_SECRET, redirect_uri: getRedirectUri(request, env), grant_type: 'authorization_code' })
+    });
+    if (!tokenResponse.ok) return html('<h1>Google login failed</h1>', 502);
+    const tokens = await tokenResponse.json();
+    const userResponse = await fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { authorization: `Bearer ${tokens.access_token}` } });
+    if (!userResponse.ok) return html('<h1>Could not verify Google account</h1>', 502);
+    const user = await userResponse.json();
+    const email = normalizeEmail(user.email);
+    if (user.email_verified !== true || !email.endsWith(`@${ALLOWED_DOMAIN}`)) return html('<h1>Access denied</h1><p>Only verified @curefit.com accounts can use this dashboard.</p>', 403);
+    const auth = await getAuth(email, env);
+    if (!auth.canView) return html('<h1>Access pending</h1><p>Your @curefit.com account is not on the dashboard access list. Contact an administrator.</p>', 403);
+    if (!store) return html('<h1>Session storage is not configured</h1>', 503);
+    const sessionId = crypto.randomUUID();
+    await store.put(`b2b:session:${sessionId}`, JSON.stringify({ email }), { expirationTtl: SESSION_TTL });
+    const headers = new Headers({ location: oauthState?.returnTo || '/', 'cache-control': 'no-store' });
+    headers.append('set-cookie', `b2b_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_TTL}`);
+    return new Response(null, { status: 302, headers });
+  }
+
+  if (url.pathname === '/auth/logout') {
+    const cookie = request.headers.get('cookie') || '';
+    const match = cookie.match(/(?:^|;\s*)b2b_session=([^;]+)/);
+    const store = getSessionStore(env);
+    if (store && match) await store.delete(`b2b:session:${decodeURIComponent(match[1])}`);
+    return new Response(null, { status: 302, headers: { location: '/', 'set-cookie': 'b2b_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0' } });
+  }
+  return null;
 }
 
 async function loadState(env) {
@@ -285,21 +396,43 @@ function getDashboardData(state) {
 }
 
 async function handleApi(request, env) {
-  const email = getUserEmail(request);
-  const auth = getAuth(email);
+  const email = await getSessionEmail(request, env);
+  const auth = await getAuth(email, env);
+  if (!auth.canView) {
+    return json({ ok: false, error: email ? 'You do not have access to this dashboard.' : 'Authentication required.', auth, loginUrl: loginUrl(request) }, email ? 403 : 401);
+  }
+
+  if (new URL(request.url).pathname === '/api/access') {
+    if (!auth.isAdmin) return json({ ok: false, error: 'Administrator access required.', auth }, 403);
+    if (request.method === 'GET') return json({ ok: true, access: await getAccessList(env), auth });
+    if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
+    const payload = await request.json();
+    const action = payload.action || '';
+    const users = await getAccessList(env);
+    const emailToChange = normalizeEmail(payload.email);
+    if (!emailToChange.endsWith(`@${ALLOWED_DOMAIN}`)) return json({ ok: false, error: 'Only @curefit.com accounts can be added.' }, 400);
+    if (!['admin', 'editor', 'viewer'].includes(payload.role)) return json({ ok: false, error: 'Role must be admin, editor, or viewer.' }, 400);
+    if (action === 'upsertAccess') {
+      const existing = users.find((user) => normalizeEmail(user.email) === emailToChange);
+      if (existing) existing.role = payload.role;
+      else users.push({ email: emailToChange, role: payload.role });
+    } else if (action === 'removeAccess') {
+      if (emailToChange === auth.email) return json({ ok: false, error: 'You cannot remove your own access.' }, 400);
+      const remainingAdmins = users.filter((user) => user.role === 'admin' && normalizeEmail(user.email) !== emailToChange);
+      if (!remainingAdmins.length) return json({ ok: false, error: 'At least one administrator must remain.' }, 400);
+      const next = users.filter((user) => normalizeEmail(user.email) !== emailToChange);
+      users.splice(0, users.length, ...next);
+    } else {
+      return json({ ok: false, error: 'Unsupported access action.' }, 400);
+    }
+    await saveAccessList(env, users);
+    return json({ ok: true, access: users, auth });
+  }
   let state;
   try {
     state = await loadState(env);
   } catch (error) {
     return json({ ok: false, error: error.message || 'Live Google Sheet read failed', auth }, 502);
-  }
-
-  if (!auth.canView) {
-    return json({
-      ok: false,
-      error: 'You do not have access to this dashboard.',
-      auth
-    }, 403);
   }
 
   if (request.method === 'GET') {
@@ -373,9 +506,15 @@ async function handleApi(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const authResponse = await handleAuth(request, env, url);
+    if (authResponse) return authResponse;
+    if (url.pathname === '/api/access') return handleApi(request, env);
     if (url.pathname === '/api' || url.pathname === '/api/') {
       return handleApi(request, env);
     }
+    const email = await getSessionEmail(request, env);
+    const auth = await getAuth(email, env);
+    if (!auth.canView) return html(INDEX_HTML.replace('</body>', `<script>window.__AUTH_REQUIRED__=true;</script></body>`));
     return html(INDEX_HTML);
   }
 };

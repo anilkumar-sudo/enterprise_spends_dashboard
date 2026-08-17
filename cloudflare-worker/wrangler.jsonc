@@ -7,6 +7,12 @@
   "observability": {
     "enabled": false
   },
+  "kv_namespaces": [
+    {
+      "binding": "ACCESS_STORE",
+      "id": "93961d4f19324dd6b200ae5744a9befa"
+    }
+  ],
   "vars": {
     "GOOGLE_LIVE_SYNC": "true",
     "GOOGLE_SHEET_ID": "1Pbr5E2EOmpI0WcpNfmlO5-Hr_SX9u4lqfFSXqrIQElg",
