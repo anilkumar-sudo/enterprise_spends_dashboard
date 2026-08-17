@@ -5,7 +5,7 @@
   "compatibility_date": "2026-05-26",
   "workers_dev": true,
   "observability": {
-    "enabled": true
+    "enabled": false
   },
   "vars": {
     "GOOGLE_LIVE_SYNC": "true",
