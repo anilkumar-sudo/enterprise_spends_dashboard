@@ -1,0 +1,47 @@
+name: Deploy B2B Spends Dashboard
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/pages-final-dashboard
+
+permissions:
+  contents: read
+
+concurrency:
+  group: b2b-spends-dashboard-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy Worker
+    runs-on: ubuntu-latest
+    environment: production
+
+    defaults:
+      run:
+        working-directory: cloudflare-worker
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cloudflare-worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Worker
+        run: npm run build
+
+      - name: Deploy to Cloudflare Workers
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
