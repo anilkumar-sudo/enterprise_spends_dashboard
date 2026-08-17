@@ -44,10 +44,10 @@ Viewers can access Overview and all Spend Category tabs. Spend Forecast and ever
 - `cloudflare-worker/worker.template.js`: editable Worker source and access rules
 - `cloudflare-worker/build-worker.mjs`: builds the deployable Worker
 - `cloudflare-worker/worker.js`: generated deployable Worker
-- `cloudflare-worker/wrangler.jsonc`: Cloudflare Worker and KV configuration
+- `cloudflare-worker/wrangler.jsonc`: Cloudflare Worker and live Google Sheets configuration
 - `cloudflare-worker/package.json`: build and deployment commands
 - `cloudflare-worker/package-lock.json`: locked deployment dependencies
-- `backend/`: optional Google Sheets / Apps Script fallback; not required by the Cloudflare KV deployment
+- `backend/`: optional Google Sheets / Apps Script fallback; not required by the direct Google Sheets API integration
 
 ## Imported production data
 
@@ -55,7 +55,7 @@ Source Sheet:
 
 - `https://docs.google.com/spreadsheets/d/1Pbr5E2EOmpI0WcpNfmlO5-Hr_SX9u4lqfFSXqrIQElg/edit`
 
-The current snapshot contains 120 spends totaling ₹3,74,20,011.37, 119 linked payment records, 20 vendors, five base budgets, and two budget reallocations. The Worker migration compares `sourceDataVersion`; deploying this version will replace an older demo-state KV record once with the approved Sheet snapshot. Later editor changes in Cloudflare KV are preserved until another intentionally versioned Sheet snapshot is deployed.
+The previous snapshot contains 120 spends totaling ₹3,74,20,011.37, 119 linked payment records, 20 vendors, five base budgets, and two budget reallocations. It remains only as a local fallback; production reads the source tabs live through the Google Sheets API.
 
 The Worker is configured for live one-way reads from the Google Sheet on each authenticated `/api` request. The browser does not receive Google credentials. Share the Sheet with the configured Google service-account email and add the service-account secrets to Wrangler. The dashboard is read-only from the Sheet; edit the Sheet and refresh the UI. The embedded snapshot is retained only as a local fallback.
 
@@ -75,7 +75,7 @@ npx wrangler deploy
 Before deploying, confirm:
 
 1. Wrangler is authenticated to the `cultfit` Cloudflare account.
-2. The `APP_STATE` KV binding exists and is attached to the Worker.
+2. The Google service-account secrets are configured and the source Sheet is shared with the service-account email.
 3. The production source is `codex/pages-final-dashboard`, with `cloudflare-worker` as the deployment root when using Git integration.
 4. Cloudflare Access protects both the `workers.dev` URL and any custom hostname.
 5. The Access policy allows the two company domains and blocks external identities.

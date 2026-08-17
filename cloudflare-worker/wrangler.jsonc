@@ -14,10 +14,5 @@
     "GOOGLE_SHEET_PAYMENTS_TAB": "Payments Tracker",
     "GOOGLE_SHEET_VENDORS_TAB": "Vendors & Agencies",
     "GOOGLE_SHEET_BUDGET_TAB": "Budget"
-  },
-  "kv_namespaces": [
-    {
-      "binding": "APP_STATE"
-    }
-  ]
+  }
 }

@@ -74,12 +74,12 @@ The Worker config is set up to:
 
 - deploy the Worker named `cult-enterprise-marketing`
 - serve on its Cloudflare `workers.dev` URL until a custom domain is attached
-- provision/use the `APP_STATE` KV binding for shared dashboard state
+- read the configured Google Sheets source live on each authenticated request
 
 ## Notes
 
 - Company viewer and editor access logic is wired in the app and Worker.
 - Approved editor emails and viewer domains are embedded in the Worker bundle.
 - The generated Worker contains the same latest interface as the standalone HTML.
-- A new snapshot version replaces stale demo data in browser storage and Cloudflare KV once during rollout.
+- The embedded snapshot is retained only as a local fallback when live Google credentials are absent.
 - GitHub contains the current source; Cloudflare production still needs to deploy the latest Worker build from `codex/pages-final-dashboard`.
