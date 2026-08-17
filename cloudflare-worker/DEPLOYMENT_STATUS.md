@@ -32,8 +32,8 @@
 - Account ID: `0909e93fab580fc177ba0f6b9f44155b`
 - Zone: `cultfit.in`
 - Zone ID: `b1790e90e2e45a45e17ef0495ca619f6`
-- Worker name: `cult-enterprise-marketing`
-- Existing URL: `https://cult-enterprise-marketing.cultfit.workers.dev/`
+- Worker name: `b2b-enterprise-spends-dashboard`
+- Existing URL: `https://b2b-enterprise-spends-dashboard.cultfit.workers.dev/`
 - Preferred custom URL: `b2b-spend-dashboard.cultfit.in`
 
 ## Current live check
