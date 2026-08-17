@@ -1,0 +1,11 @@
+source-assets.b64
+source-assets.zip
+imported/
+node_modules/
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.env.example
+dist/
+*.log

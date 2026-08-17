@@ -1,0 +1,14 @@
+{
+  "name": "cult-enterprise-marketing-cloudflare-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build-worker.mjs",
+    "deploy": "npm run build && wrangler deploy",
+    "check": "wrangler check",
+    "dev": "npm run build && wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.21.0"
+  }
+}
