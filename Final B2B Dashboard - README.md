@@ -35,7 +35,7 @@ Or directly open the local file in a browser:
 
 ## Current Data Source
 
-The dashboard snapshot was imported from:
+The live dashboard source is:
 
 - `Marketing Spend Dashboard: cult Enterprise | FY26-27`
 - `https://docs.google.com/spreadsheets/d/1Pbr5E2EOmpI0WcpNfmlO5-Hr_SX9u4lqfFSXqrIQElg/edit`
@@ -48,7 +48,7 @@ Current imported totals:
 - ₹3,74,20,011.37 total spend
 - ₹11,39,00,000 effective FY budget after two reallocations
 
-This is a versioned deployment snapshot, not a continuous Google Sheets sync. Updating the Sheet later requires refreshing `assets/google-sheet-snapshot.js`, rebuilding `cloudflare-worker/worker.js`, and redeploying.
+The Worker now reads the four source tabs from Google Sheets on each authenticated `/api` request. After a Sheet edit, refresh the dashboard to load the new values. The embedded snapshot remains only as a local-development fallback and is not the production source when the Google service-account secrets are configured.
 
 Data-quality note: the Sheet currently has payment-ledger amount mismatches for `CULT-ENT-3`, `CULT-ENT-17`, and `CULT-ENT-18`. The dashboard uses `Marketing Detail Spends` as the financial amount source and merges only payment metadata by transaction ID, so its total remains aligned with the Sheet Overview.
 

@@ -5,7 +5,7 @@
 - The final dashboard UI is in `Final B2B Dashboard.html`.
 - The deployable Worker is generated at `cloudflare-worker/worker.js`.
 - The Worker serves the UI and `/api`; the transparent Cult for Corporates logo is embedded in the generated production HTML.
-- The Worker embeds the versioned Google Sheet snapshot with 120 spends totaling ₹3,74,20,011.37 and ₹11.39 crore effective budget.
+- The Worker reads `Marketing Detail Spends`, `Payments Tracker`, `Vendors & Agencies`, and `Budget` live from Google Sheets on each authenticated `/api` request, with the embedded snapshot retained as a local fallback.
 - Workers KV is configured through the `APP_STATE` binding.
 - Company viewer and restricted editor permissions are enforced in the Worker.
 - The target GitHub deployment branch is `codex/pages-final-dashboard`; confirm the Anil editor update has been synced before a Git-based deployment.
@@ -48,7 +48,7 @@ On August 7, 2026, unauthenticated requests to both `/` and `/api` returned `403
 4. Verify the Cloudflare Access policy forwards `cf-access-authenticated-user-email`.
 5. Test one approved editor, one company viewer, and one external identity.
 6. Attach `b2b-spend-dashboard.cultfit.in` only after the `workers.dev` deployment passes verification.
-7. Verify the first authenticated request migrates the old KV seed to source version `google-sheet-120-3742001137-20260807-v2`.
+7. Verify the authenticated response reports `source.mode: live-google-sheet` and that a controlled Sheet edit appears after refreshing the dashboard.
 
 ## Local deployment commands
 

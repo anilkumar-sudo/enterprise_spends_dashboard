@@ -7,6 +7,14 @@
   "observability": {
     "enabled": true
   },
+  "vars": {
+    "GOOGLE_LIVE_SYNC": "true",
+    "GOOGLE_SHEET_ID": "1Pbr5E2EOmpI0WcpNfmlO5-Hr_SX9u4lqfFSXqrIQElg",
+    "GOOGLE_SHEET_SPEND_TAB": "Marketing Detail Spends",
+    "GOOGLE_SHEET_PAYMENTS_TAB": "Payments Tracker",
+    "GOOGLE_SHEET_VENDORS_TAB": "Vendors & Agencies",
+    "GOOGLE_SHEET_BUDGET_TAB": "Budget"
+  },
   "kv_namespaces": [
     {
       "binding": "APP_STATE"

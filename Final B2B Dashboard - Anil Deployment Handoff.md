@@ -57,7 +57,7 @@ Source Sheet:
 
 The current snapshot contains 120 spends totaling ₹3,74,20,011.37, 119 linked payment records, 20 vendors, five base budgets, and two budget reallocations. The Worker migration compares `sourceDataVersion`; deploying this version will replace an older demo-state KV record once with the approved Sheet snapshot. Later editor changes in Cloudflare KV are preserved until another intentionally versioned Sheet snapshot is deployed.
 
-The current implementation is snapshot-based rather than a continuous two-way Google Sheets sync. Refresh the snapshot and rebuild the Worker whenever the maintained Sheet needs to be republished.
+The Worker is configured for live one-way reads from the Google Sheet on each authenticated `/api` request. The browser does not receive Google credentials. Share the Sheet with the configured Google service-account email and add the service-account secrets to Wrangler. The dashboard is read-only from the Sheet; edit the Sheet and refresh the UI. The embedded snapshot is retained only as a local fallback.
 
 The source Sheet has three payment-ledger amount mismatches: `CULT-ENT-3`, `CULT-ENT-17`, and `CULT-ENT-18`. The import intentionally keeps the amount from `Marketing Detail Spends` and merges payment metadata by ID, preserving the ₹3,74,20,011.37 Overview total.
 
