@@ -1089,6 +1089,10 @@
     <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 11l3-3 3 3 3-5 3 2"/><rect x="1" y="2" width="14" height="12" rx="1.5"/></svg>
     Budget Management
   </div>
+  <div class="nav-item" data-page="access" onclick="showPage('access',this)">
+    <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="5" r="3"/><path d="M2 14c.5-3 2.5-4.5 6-4.5s5.5 1.5 6 4.5"/><path d="M11.5 5.5h3M13 4v3"/></svg>
+    Access Management
+  </div>
 
   <div class="sb-footer">
     <div class="fy-pill">FY 2026–27</div>
@@ -1103,6 +1107,8 @@
   </div>
   <div class="hdr-actions">
     <div class="role-pill editor" id="auth-role-pill">Editor</div>
+    <button class="export-btn" id="auth-login-btn" onclick="window.location.href='/auth/login'" hidden>Sign in with Google</button>
+    <button class="export-btn" id="auth-logout-btn" onclick="window.location.href='/auth/logout'" hidden>Sign out</button>
     <div class="icon-btn" onclick="toggleActivityPanel()" title="Recent activity">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11h2.6l1.7-4 2.4 6 2.1-5H14"/><path d="M2 3h12"/></svg>
     </div>
@@ -1516,6 +1522,21 @@
   <div id="budget-cats"></div>
 </div>
 
+<div class="page" id="page-access">
+  <div class="page-header">
+    <div><div class="page-title">Access Management</div><div class="page-subtitle">Manage approved @curefit.com users and dashboard roles</div></div>
+  </div>
+  <div class="card" style="margin-bottom:14px">
+    <div class="section-heading">Add or update access</div>
+    <div style="display:grid;grid-template-columns:minmax(220px,1fr) 160px auto;gap:10px;align-items:end">
+      <label class="field-label">Curefit email<input class="form-control" id="access-email" type="email" placeholder="name@curefit.com"></label>
+      <label class="field-label">Role<select class="form-control" id="access-role"><option value="viewer">Viewer</option><option value="editor">Editor</option><option value="admin">Admin</option></select></label>
+      <button class="btn-primary" onclick="saveAccessUser()">Save access</button>
+    </div>
+  </div>
+  <div class="card"><div class="section-heading">Approved users</div><div id="access-users-table">Loading access list…</div></div>
+</div>
+
 <!-- ── EXPORT MODAL ── -->
 <div id="export-modal" style="display:none;position:fixed;inset:0;z-index:500;align-items:center;justify-content:center;">
   <div onclick="closeExportModal()" style="position:absolute;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px)"></div>
@@ -1676,7 +1697,8 @@ const APP_CONFIG = {
   // IT should paste the deployed Apps Script web app URL here for the live site.
   backendUrl: window.location.protocol === 'file:' ? '' : `${window.location.origin}/api`,
 };
-const EDITOR_VISIBLE_TABS = ['overview', 'forecast', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events', 'spends', 'payments', 'vendors', 'budget'];
+const ADMIN_VISIBLE_TABS = ['overview', 'forecast', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events', 'spends', 'payments', 'vendors', 'budget', 'access'];
+const EDITOR_VISIBLE_TABS = ADMIN_VISIBLE_TABS.filter(tab => tab !== 'access');
 const VIEWER_VISIBLE_TABS = ['overview', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events'];
 const OPERATIONS_PAGES = ['spends', 'payments', 'vendors', 'budget'];
 
@@ -1697,11 +1719,12 @@ let state = {
   activityLog: [],
   auth: {
     email: '',
-    role: 'editor',
+    role: 'admin',
     canEdit: true,
     source: 'local-preview',
     canView: true,
-    visibleTabs: [...EDITOR_VISIBLE_TABS]
+    visibleTabs: [...ADMIN_VISIBLE_TABS],
+    isAdmin: true
   },
   nextId: 0,
   charts: {}
@@ -1876,9 +1899,10 @@ function applyBackendPayload(payload) {
       role: payload.auth.role || 'viewer',
       canEdit: Boolean(payload.auth.canEdit),
       canView: payload.auth.canView !== false,
+      isAdmin: Boolean(payload.auth.isAdmin),
       visibleTabs: Array.isArray(payload.auth.visibleTabs) && payload.auth.visibleTabs.length
         ? payload.auth.visibleTabs
-        : (payload.auth.canEdit ? [...EDITOR_VISIBLE_TABS] : [...VIEWER_VISIBLE_TABS]),
+        : (payload.auth.isAdmin ? [...ADMIN_VISIBLE_TABS] : payload.auth.canEdit ? [...EDITOR_VISIBLE_TABS] : [...VIEWER_VISIBLE_TABS]),
       source: 'workspace'
     };
   }
@@ -1889,10 +1913,11 @@ async function hydrateFromBackend() {
   if (!isBackendEnabled()) {
     state.auth = {
       email: '',
-      role: 'editor',
+      role: 'admin',
       canEdit: true,
       canView: true,
-      visibleTabs: [...EDITOR_VISIBLE_TABS],
+      visibleTabs: [...ADMIN_VISIBLE_TABS],
+      isAdmin: true,
       source: 'local-preview'
     };
     applyAuthUI();
@@ -1906,9 +1931,13 @@ async function hydrateFromBackend() {
       headers: { 'Accept': 'application/json' }
     });
 
-    if (!response.ok) {
-      throw new Error('Failed to verify access');
+    if (response.status === 401) {
+      const unauthenticated = await response.json().catch(() => ({}));
+      state.auth = { email: '', role: 'restricted', canEdit: false, canView: false, isAdmin: false, visibleTabs: [], source: 'unauthenticated', loginUrl: unauthenticated.loginUrl || '/auth/login' };
+      applyAuthUI();
+      return;
     }
+    if (!response.ok) throw new Error('Failed to verify access');
 
     const payload = await response.json();
     if (payload) applyBackendPayload(payload);
@@ -1918,6 +1947,7 @@ async function hydrateFromBackend() {
       role: 'viewer',
       canEdit: false,
       canView: false,
+      isAdmin: false,
       visibleTabs: [],
       source: 'workspace-error'
     };
@@ -2003,8 +2033,17 @@ function applyAuthUI() {
   const auth = state.auth || { role: 'viewer', canEdit: false, canView: false };
 
   if (rolePill) {
-    rolePill.className = 'role-pill ' + (auth.canEdit ? 'editor' : 'viewer');
-    rolePill.textContent = !auth.canView ? 'Restricted' : auth.canEdit ? 'Editor access' : 'View only';
+    rolePill.className = 'role-pill ' + (auth.isAdmin || auth.canEdit ? 'editor' : 'viewer');
+    rolePill.textContent = !auth.canView ? 'Restricted' : auth.isAdmin ? 'Admin access' : auth.canEdit ? 'Editor access' : 'View only';
+  }
+  const loginButton = document.getElementById('auth-login-btn');
+  const logoutButton = document.getElementById('auth-logout-btn');
+  if (loginButton) loginButton.hidden = Boolean(auth.canView);
+  if (logoutButton) logoutButton.hidden = !Boolean(auth.canView);
+  if (!auth.canView && auth.source === 'unauthenticated') {
+    if (bannerTitle) bannerTitle.textContent = 'Sign in required';
+    if (bannerCopy) bannerCopy.textContent = 'Sign in with your verified @curefit.com Google account to continue.';
+    if (loginButton) loginButton.hidden = false;
   }
 
   if (banner && bannerTitle && bannerCopy && bannerUser) {
@@ -2365,7 +2404,8 @@ const PAGE_TITLES = {
   spends: 'Marketing Detail Spends',
   payments: 'Payments Tracker',
   vendors: 'Vendors & Agencies',
-  budget: 'Budget Management'
+  budget: 'Budget Management',
+  access: 'Access Management'
 };
 
 const PAGE_CONTEXT = {
@@ -2379,7 +2419,8 @@ const PAGE_CONTEXT = {
   spends: 'Manually enter and manage marketing expenses across all categories.',
   payments: 'Track PO numbers, invoice dates, payment status, and settlement details.',
   vendors: 'Manage your vendor roster and maintain spend ownership across partners.',
-  budget: 'Set budgets, review reallocations, and monitor utilization by category.'
+  budget: 'Set budgets, review reallocations, and monitor utilization by category.',
+  access: 'Approve @curefit.com users and assign viewer, editor, or admin access.'
 };
 
 function showPage(id, navEl) {
@@ -2416,8 +2457,63 @@ function renderPage(id) {
   else if (id === 'payments') renderPayments();
   else if (id === 'vendors') renderVendors();
   else if (id === 'budget') renderBudget();
+  else if (id === 'access') renderAccessManagement();
   renderInsightRail();
   applyAuthUI();
+}
+
+async function renderAccessManagement() {
+  const target = document.getElementById('access-users-table');
+  if (!target) return;
+  if (!state.auth?.isAdmin) {
+    target.textContent = 'Administrator access required.';
+    return;
+  }
+  target.textContent = 'Loading access list…';
+  try {
+    const response = await fetch(`${APP_CONFIG.backendUrl}/access`, { credentials: 'include', headers: { Accept: 'application/json' } });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Could not load access list');
+    target.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Email</th><th>Role</th><th>Actions</th></tr></thead><tbody>${result.access.map((user) => `<tr><td>${escapeHtml(user.email)}</td><td><span class="role-pill ${user.role === 'viewer' ? 'viewer' : 'editor'}">${user.role}</span></td><td><button class="btn-danger" onclick="removeAccessUser('${escapeHtml(user.email)}')">Remove</button></td></tr>`).join('')}</tbody></table></div>`;
+  } catch (error) {
+    target.textContent = error.message || 'Could not load access list';
+  }
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+}
+
+async function saveAccessUser() {
+  if (!state.auth?.isAdmin) return showToast('Administrator access required.');
+  const email = document.getElementById('access-email')?.value.trim().toLowerCase();
+  const role = document.getElementById('access-role')?.value;
+  if (!email.endsWith('@curefit.com')) return showToast('Use a valid @curefit.com email address.');
+  try {
+    await postAccessAction({ action: 'upsertAccess', email, role });
+    document.getElementById('access-email').value = '';
+    showToast('Access saved.');
+    renderAccessManagement();
+  } catch (error) { showToast(error.message); }
+}
+
+async function removeAccessUser(email) {
+  if (!state.auth?.isAdmin) return showToast('Administrator access required.');
+  if (!window.confirm(`Remove access for ${email}?`)) return;
+  try {
+    await postAccessAction({ action: 'removeAccess', email, role: 'viewer' });
+    showToast('Access removed.');
+    renderAccessManagement();
+  } catch (error) { showToast(error.message); }
+}
+
+async function postAccessAction(payload) {
+  const response = await fetch(`${APP_CONFIG.backendUrl}/access`, {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(payload)
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result.ok === false) throw new Error(result.error || 'Access update failed');
+  return result;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

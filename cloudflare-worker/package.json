@@ -1,5 +1,5 @@
 {
-  "name": "cult-enterprise-marketing-cloudflare-worker",
+  "name": "b2b-enterprise-spends-dashboard-cloudflare-worker",
   "private": true,
   "type": "module",
   "scripts": {

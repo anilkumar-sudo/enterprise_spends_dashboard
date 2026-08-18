@@ -6,21 +6,19 @@
 - The deployable Worker is generated at `cloudflare-worker/worker.js`.
 - The Worker serves the UI and `/api`; the transparent Cult for Corporates logo is embedded in the generated production HTML.
 - The Worker reads `Marketing Detail Spends`, `Payments Tracker`, `Vendors & Agencies`, and `Budget` live from Google Sheets on each authenticated `/api` request, with the embedded snapshot retained as a local fallback.
-- Workers KV is configured through the `APP_STATE` binding.
-- Company viewer and restricted editor permissions are enforced in the Worker.
+- Workers KV is configured through the `ACCESS_STORE` binding for OAuth sessions and access records.
+- Google OAuth restricts login to verified `@curefit.com` accounts.
+- Admin, editor, and viewer permissions are enforced in the Worker and exposed through the Access Management tab.
 - The target GitHub deployment branch is `codex/pages-final-dashboard`; confirm the Anil editor update has been synced before a Git-based deployment.
 
-## Approved editors
+## Initial administrators
 
-- `nikhil.zutshi@curefit.com`
-- `divya.agarwal@curefit.com`
-- `alvina.davidson@curefit.com`
-- `arjit.shukla@curefit.com`
 - `anil.kumar@curefit.com`
+- `nikhil.zutshi@curefit.com`
 
 ## Viewer policy
 
-- Authenticated `@curefit.com` and `@cultfit.in` users receive viewer access.
+- Only verified `@curefit.com` users can log in through Google OAuth.
 - Viewers can see Overview and all Spend Category tabs.
 - Spend Forecast and all Operations tabs are editor-only.
 - External domains are denied access.
@@ -32,8 +30,8 @@
 - Account ID: `0909e93fab580fc177ba0f6b9f44155b`
 - Zone: `cultfit.in`
 - Zone ID: `b1790e90e2e45a45e17ef0495ca619f6`
-- Worker name: `cult-enterprise-marketing`
-- Existing URL: `https://cult-enterprise-marketing.cultfit.workers.dev/`
+- Worker name: `b2b-enterprise-spends-dashboard`
+- Existing URL: `https://b2b-enterprise-spends-dashboard.cultfit.workers.dev/`
 - Preferred custom URL: `b2b-spend-dashboard.cultfit.in`
 
 ## Current live check
@@ -44,11 +42,12 @@ On August 7, 2026, unauthenticated requests to both `/` and `/api` returned `403
 
 1. Authenticate Wrangler or the Cloudflare Git integration with Worker deployment rights.
 2. Deploy from GitHub branch `codex/pages-final-dashboard` using `cloudflare-worker` as the deployment root.
-3. Confirm or create the `APP_STATE` KV binding.
-4. Verify the Cloudflare Access policy forwards `cf-access-authenticated-user-email`.
-5. Test one approved editor, one company viewer, and one external identity.
-6. Attach `b2b-spend-dashboard.cultfit.in` only after the `workers.dev` deployment passes verification.
-7. Verify the authenticated response reports `source.mode: live-google-sheet` and that a controlled Sheet edit appears after refreshing the dashboard.
+3. Set `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, and `GOOGLE_OAUTH_REDIRECT_URI` as Worker secrets.
+4. Register `https://b2b-enterprise-spends-dashboard.cultfit.workers.dev/auth/callback` as the Google OAuth redirect URI.
+5. Confirm the `ACCESS_STORE` KV binding is available.
+6. Test one admin, one editor, one viewer, an unlisted company account, and one external identity.
+7. Attach `b2b-spend-dashboard.cultfit.in` only after the `workers.dev` deployment passes verification.
+8. Verify the authenticated response reports `source.mode: live-google-sheet` and that a controlled Sheet edit appears after refreshing the dashboard.
 
 ## Local deployment commands
 
