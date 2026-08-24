@@ -2,6 +2,4 @@
 GOOGLE_SERVICE_ACCOUNT_EMAIL=service-account@your-project.iam.gserviceaccount.com
 GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\nREPLACE_WITH_PRIVATE_KEY\\n-----END PRIVATE KEY-----\\n"
 GOOGLE_OAUTH_CLIENT_ID=replace-with-google-web-client-id
-GOOGLE_OAUTH_CLIENT_SECRET=replace-with-google-web-client-secret
-# Optional when the local port differs from 8787:
-# GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8787/auth/callback
+# AUTH_DB is provided by the wrangler D1 binding after Infra provisions it.

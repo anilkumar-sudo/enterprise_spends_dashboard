@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>cult | Enterprise Marketing Spend Dashboard | FY 2026-27</title>
@@ -1107,7 +1108,8 @@
   </div>
   <div class="hdr-actions">
     <div class="role-pill editor" id="auth-role-pill">Editor</div>
-    <button class="export-btn" id="auth-login-btn" onclick="window.location.href='/auth/login'" hidden>Sign in with Google</button>
+    <div id="google-signin-button" hidden></div>
+    <button class="export-btn" id="auth-login-btn" onclick="startGoogleSignIn()" hidden>Sign in with Google</button>
     <button class="export-btn" id="auth-logout-btn" onclick="window.location.href='/auth/logout'" hidden>Sign out</button>
     <div class="icon-btn" onclick="toggleActivityPanel()" title="Recent activity">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11h2.6l1.7-4 2.4 6 2.1-5H14"/><path d="M2 3h12"/></svg>
@@ -1957,6 +1959,62 @@ async function hydrateFromBackend() {
   applyAuthUI();
 }
 
+let googleIdentityReady = false;
+let googleIdentityInitializing = false;
+
+function initGoogleIdentity() {
+  const clientId = window.__GOOGLE_CLIENT_ID__;
+  const button = document.getElementById('google-signin-button');
+  if (!clientId || !button || !window.google?.accounts?.id || googleIdentityReady || googleIdentityInitializing) return;
+  googleIdentityInitializing = true;
+  google.accounts.id.initialize({
+    client_id: clientId,
+    callback: handleGoogleCredential,
+    hd: 'curefit.com',
+    ux_mode: 'popup',
+    auto_select: false,
+    cancel_on_tap_outside: true
+  });
+  google.accounts.id.renderButton(button, {
+    type: 'standard',
+    theme: 'outline',
+    size: 'medium',
+    text: 'signin_with',
+    shape: 'rectangular',
+    logo_alignment: 'left'
+  });
+  googleIdentityReady = true;
+  googleIdentityInitializing = false;
+}
+
+function startGoogleSignIn() {
+  initGoogleIdentity();
+  if (googleIdentityReady) {
+    const button = document.querySelector('#google-signin-button [role="button"]');
+    if (button) button.click();
+    else google.accounts.id.prompt();
+  } else {
+    showToast('Google sign-in is still loading. Please try again.');
+  }
+}
+
+async function handleGoogleCredential(response) {
+  if (!response?.credential) return showToast('Google sign-in did not return an ID token.');
+  try {
+    const result = await fetch('/auth/google', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ credential: response.credential, returnTo: window.location.pathname })
+    });
+    const payload = await result.json().catch(() => ({}));
+    if (!result.ok || payload.ok === false) throw new Error(payload.error || 'Google sign-in failed');
+    window.location.assign(payload.redirectTo || '/');
+  } catch (error) {
+    showToast(error.message || 'Google sign-in failed.');
+  }
+}
+
 async function postBackendAction(action, payload) {
   const response = await fetch(APP_CONFIG.backendUrl, {
     method: 'POST',
@@ -2038,8 +2096,16 @@ function applyAuthUI() {
   }
   const loginButton = document.getElementById('auth-login-btn');
   const logoutButton = document.getElementById('auth-logout-btn');
-  if (loginButton) loginButton.hidden = Boolean(auth.canView);
+  const googleButton = document.getElementById('google-signin-button');
+  if (loginButton) loginButton.hidden = Boolean(auth.canView) || Boolean(window.__GOOGLE_CLIENT_ID__);
   if (logoutButton) logoutButton.hidden = !Boolean(auth.canView);
+  if (googleButton) {
+    googleButton.hidden = Boolean(auth.canView) || !window.__GOOGLE_CLIENT_ID__;
+    if (!googleButton.hidden) {
+      initGoogleIdentity();
+      if (!googleIdentityReady) setTimeout(initGoogleIdentity, 300);
+    }
+  }
   if (!auth.canView && auth.source === 'unauthenticated') {
     if (bannerTitle) bannerTitle.textContent = 'Sign in required';
     if (bannerCopy) bannerCopy.textContent = 'Sign in with your verified @curefit.com Google account to continue.';

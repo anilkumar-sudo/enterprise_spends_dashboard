@@ -7,6 +7,8 @@ const ADMIN_TABS = ['overview', 'forecast', 'cat-media', 'cat-services', 'cat-br
 const EDITOR_TABS = ADMIN_TABS.filter((tab) => tab !== 'access');
 const VIEWER_TABS = ['overview', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events'];
 const SESSION_TTL = 60 * 60 * 24 * 7;
+const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
+const GOOGLE_ISSUERS = new Set(['accounts.google.com', 'https://accounts.google.com']);
 
 const INITIAL_STATE = __INITIAL_STATE__;
 const INDEX_HTML = __INDEX_HTML__;
@@ -202,22 +204,19 @@ function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
 }
 
-function getRedirectUri(request, env) {
-  return env.GOOGLE_OAUTH_REDIRECT_URI || `${new URL(request.url).origin}/auth/callback`;
-}
-
 function getSessionStore(env) {
   return env.ACCESS_STORE && typeof env.ACCESS_STORE.get === 'function' ? env.ACCESS_STORE : null;
 }
 
-async function getAccessList(env) {
+function getAuthDb(env) {
+  return env.AUTH_DB && typeof env.AUTH_DB.prepare === 'function' ? env.AUTH_DB : null;
+}
+
+async function getLegacyAccessList(env) {
   const store = getSessionStore(env);
   if (!store) return structuredClone(DEFAULT_ACCESS);
   const raw = await store.get('b2b:access:users');
-  if (!raw) {
-    await store.put('b2b:access:users', JSON.stringify(DEFAULT_ACCESS));
-    return structuredClone(DEFAULT_ACCESS);
-  }
+  if (!raw) return structuredClone(DEFAULT_ACCESS);
   try {
     const users = JSON.parse(raw);
     return Array.isArray(users) ? users : structuredClone(DEFAULT_ACCESS);
@@ -226,9 +225,57 @@ async function getAccessList(env) {
   }
 }
 
+async function getD1Users(env) {
+  const db = getAuthDb(env);
+  if (!db) return null;
+  const result = await db.prepare('SELECT email, role FROM users ORDER BY email').all();
+  return result.results || [];
+}
+
+async function ensureD1Users(env) {
+  const db = getAuthDb(env);
+  if (!db) return;
+  const existing = await getD1Users(env);
+  if (existing.length) return;
+  const seed = await getLegacyAccessList(env);
+  for (const user of seed) {
+    await db.prepare(`INSERT INTO users (id, google_sub, email, role, email_verified, hosted_domain, created_at, updated_at, last_login_at)
+      VALUES (?, ?, ?, ?, 1, ?, unixepoch(), unixepoch(), NULL)
+      ON CONFLICT(email) DO UPDATE SET role = excluded.role, updated_at = unixepoch()`)
+      .bind(`legacy:${normalizeEmail(user.email)}`, `legacy:${normalizeEmail(user.email)}`, normalizeEmail(user.email), user.role, ALLOWED_DOMAIN)
+      .run();
+  }
+}
+
+async function getAccessList(env) {
+  await ensureD1Users(env);
+  const d1Users = await getD1Users(env);
+  if (d1Users) return d1Users;
+  const users = await getLegacyAccessList(env);
+  const store = getSessionStore(env);
+  if (store && !(await store.get('b2b:access:users'))) await store.put('b2b:access:users', JSON.stringify(users));
+  return users;
+}
+
 async function saveAccessList(env, users) {
   const store = getSessionStore(env);
   if (store) await store.put('b2b:access:users', JSON.stringify(users));
+  const db = getAuthDb(env);
+  if (!db) return;
+  const existing = await getD1Users(env);
+  const wanted = new Set(users.map((user) => normalizeEmail(user.email)));
+  for (const user of users) {
+    await db.prepare(`INSERT INTO users (id, google_sub, email, role, email_verified, hosted_domain, created_at, updated_at, last_login_at)
+      VALUES (?, ?, ?, ?, 1, ?, unixepoch(), unixepoch(), NULL)
+      ON CONFLICT(email) DO UPDATE SET role = excluded.role, updated_at = unixepoch()`)
+      .bind(`managed:${normalizeEmail(user.email)}`, `managed:${normalizeEmail(user.email)}`, normalizeEmail(user.email), user.role, ALLOWED_DOMAIN)
+      .run();
+  }
+  for (const user of existing) {
+    if (!wanted.has(normalizeEmail(user.email))) {
+      await db.prepare('DELETE FROM users WHERE email = ?').bind(normalizeEmail(user.email)).run();
+    }
+  }
 }
 
 async function getSessionEmail(request, env) {
@@ -240,6 +287,12 @@ async function getSessionEmail(request, env) {
   const cookie = request.headers.get('cookie') || '';
   const match = cookie.match(/(?:^|;\s*)b2b_session=([^;]+)/);
   if (!match) return '';
+  const db = getAuthDb(env);
+  if (db) {
+    const result = await db.prepare(`SELECT users.email FROM sessions JOIN users ON users.id = sessions.user_id
+      WHERE sessions.id = ? AND sessions.expires_at > unixepoch()`).bind(decodeURIComponent(match[1])).first();
+    return normalizeEmail(result?.email);
+  }
   const store = getSessionStore(env);
   if (!store) return '';
   const session = await store.get(`b2b:session:${decodeURIComponent(match[1])}`, 'json');
@@ -274,57 +327,88 @@ function loginUrl(request) {
   return `/auth/login?returnTo=${encodeURIComponent(new URL(request.url).pathname)}`;
 }
 
-async function handleAuth(request, env, url) {
-  if (url.pathname === '/auth/login') {
-    if (!env.GOOGLE_OAUTH_CLIENT_ID) return html('<h1>Google login is not configured</h1><p>Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET in Worker secrets.</p>', 503);
-    const state = crypto.randomUUID();
+function decodeJwtPart(value) {
+  return JSON.parse(new TextDecoder().decode(base64UrlDecode(value)));
+}
+
+async function verifyGoogleIdToken(token, env) {
+  if (!env.GOOGLE_OAUTH_CLIENT_ID) throw new Error('Google Identity Services client ID is not configured');
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3) throw new Error('Invalid Google ID token');
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  const header = decodeJwtPart(encodedHeader);
+  const claims = decodeJwtPart(encodedPayload);
+  if (header.alg !== 'RS256' || !header.kid) throw new Error('Unsupported Google ID token signature');
+  if (!GOOGLE_ISSUERS.has(claims.iss)) throw new Error('Invalid Google ID token issuer');
+  if (claims.aud !== env.GOOGLE_OAUTH_CLIENT_ID) throw new Error('Invalid Google ID token audience');
+  const now = Math.floor(Date.now() / 1000);
+  if (!claims.exp || claims.exp <= now || (claims.nbf && claims.nbf > now + 60)) throw new Error('Expired Google ID token');
+  const jwksResponse = await fetch(GOOGLE_JWKS_URL, { cf: { cacheTtl: 3600, cacheEverything: true } });
+  if (!jwksResponse.ok) throw new Error('Could not load Google signing keys');
+  const jwks = await jwksResponse.json();
+  const jwk = (jwks.keys || []).find((key) => key.kid === header.kid);
+  if (!jwk) throw new Error('Google signing key not found');
+  const publicKey = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+  const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', publicKey, base64UrlDecode(encodedSignature), new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`));
+  if (!valid) throw new Error('Invalid Google ID token signature');
+  const email = normalizeEmail(claims.email);
+  if (!claims.sub || !email || claims.email_verified !== true || claims.hd !== ALLOWED_DOMAIN || !email.endsWith(`@${ALLOWED_DOMAIN}`)) {
+    throw new Error('Only verified @curefit.com Google Workspace accounts are allowed');
+  }
+  return { ...claims, email };
+}
+
+async function createSessionForGoogleUser(env, claims) {
+  const auth = await getAuth(claims.email, env);
+  if (!auth.canView) throw new Error('Your @curefit.com account is not on the dashboard access list. Contact an administrator.');
+  const sessionId = crypto.randomUUID();
+  const db = getAuthDb(env);
+  if (db) {
+    const existing = await db.prepare('SELECT id FROM users WHERE email = ? OR google_sub = ? LIMIT 1').bind(claims.email, claims.sub).first();
+    const userId = existing?.id || claims.sub;
+    if (existing) {
+      await db.prepare(`UPDATE users SET google_sub = ?, email = ?, role = ?, email_verified = 1, hosted_domain = ?, updated_at = unixepoch(), last_login_at = unixepoch()
+        WHERE id = ?`).bind(claims.sub, claims.email, auth.role, ALLOWED_DOMAIN, userId).run();
+    } else {
+      await db.prepare(`INSERT INTO users (id, google_sub, email, role, email_verified, hosted_domain, created_at, updated_at, last_login_at)
+        VALUES (?, ?, ?, ?, 1, ?, unixepoch(), unixepoch(), unixepoch())`)
+        .bind(userId, claims.sub, claims.email, auth.role, ALLOWED_DOMAIN).run();
+    }
+    await db.prepare('INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES (?, ?, unixepoch() + ?, unixepoch())')
+      .bind(sessionId, userId, SESSION_TTL)
+      .run();
+  } else {
     const store = getSessionStore(env);
-    if (store) await store.put(`b2b:oauth:${state}`, JSON.stringify({ returnTo: url.searchParams.get('returnTo') || '/' }), { expirationTtl: 600 });
-    const params = new URLSearchParams({
-      client_id: env.GOOGLE_OAUTH_CLIENT_ID,
-      redirect_uri: getRedirectUri(request, env),
-      response_type: 'code',
-      scope: 'openid email profile',
-      access_type: 'online',
-      prompt: 'select_account',
-      state
-    });
-    return redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+    if (!store) throw new Error('Session storage is not configured');
+    await store.put(`b2b:session:${sessionId}`, JSON.stringify({ email: claims.email }), { expirationTtl: SESSION_TTL });
+  }
+  return sessionId;
+}
+
+async function handleAuth(request, env, url) {
+  if (url.pathname === '/auth/google') {
+    if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
+    const origin = request.headers.get('origin');
+    if (origin && origin !== url.origin) return json({ ok: false, error: 'Invalid request origin' }, 403);
+    try {
+      const payload = await request.json();
+      const claims = await verifyGoogleIdToken(payload.credential, env);
+      const sessionId = await createSessionForGoogleUser(env, claims);
+      return json({ ok: true, redirectTo: typeof payload.returnTo === 'string' && payload.returnTo.startsWith('/') ? payload.returnTo : '/', email: claims.email });
+    } catch (error) {
+      return json({ ok: false, error: error.message || 'Google sign-in failed' }, 401);
+    }
   }
 
-  if (url.pathname === '/auth/callback') {
-    const code = url.searchParams.get('code');
-    const state = url.searchParams.get('state');
-    if (!code || !state || !env.GOOGLE_OAUTH_CLIENT_ID || !env.GOOGLE_OAUTH_CLIENT_SECRET) return html('<h1>Invalid Google login response</h1>', 400);
-    const store = getSessionStore(env);
-    const oauthState = store ? await store.get(`b2b:oauth:${state}`, 'json') : null;
-    if (store) await store.delete(`b2b:oauth:${state}`);
-    if (store && !oauthState) return html('<h1>Login expired</h1><p>Please try again.</p>', 400);
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ code, client_id: env.GOOGLE_OAUTH_CLIENT_ID, client_secret: env.GOOGLE_OAUTH_CLIENT_SECRET, redirect_uri: getRedirectUri(request, env), grant_type: 'authorization_code' })
-    });
-    if (!tokenResponse.ok) return html('<h1>Google login failed</h1>', 502);
-    const tokens = await tokenResponse.json();
-    const userResponse = await fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { authorization: `Bearer ${tokens.access_token}` } });
-    if (!userResponse.ok) return html('<h1>Could not verify Google account</h1>', 502);
-    const user = await userResponse.json();
-    const email = normalizeEmail(user.email);
-    if (user.email_verified !== true || !email.endsWith(`@${ALLOWED_DOMAIN}`)) return html('<h1>Access denied</h1><p>Only verified @curefit.com accounts can use this dashboard.</p>', 403);
-    const auth = await getAuth(email, env);
-    if (!auth.canView) return html('<h1>Access pending</h1><p>Your @curefit.com account is not on the dashboard access list. Contact an administrator.</p>', 403);
-    if (!store) return html('<h1>Session storage is not configured</h1>', 503);
-    const sessionId = crypto.randomUUID();
-    await store.put(`b2b:session:${sessionId}`, JSON.stringify({ email }), { expirationTtl: SESSION_TTL });
-    const headers = new Headers({ location: oauthState?.returnTo || '/', 'cache-control': 'no-store' });
-    headers.append('set-cookie', `b2b_session=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_TTL}`);
-    return new Response(null, { status: 302, headers });
+  if (url.pathname === '/auth/login') {
+    return html('<h1>Use the Google sign-in button</h1><p>Return to the dashboard and use Sign in with Google.</p>', 400);
   }
 
   if (url.pathname === '/auth/logout') {
     const cookie = request.headers.get('cookie') || '';
     const match = cookie.match(/(?:^|;\s*)b2b_session=([^;]+)/);
+    const db = getAuthDb(env);
+    if (db && match) await db.prepare('DELETE FROM sessions WHERE id = ?').bind(decodeURIComponent(match[1])).run();
     const store = getSessionStore(env);
     if (store && match) await store.delete(`b2b:session:${decodeURIComponent(match[1])}`);
     return new Response(null, { status: 302, headers: { location: '/', 'set-cookie': 'b2b_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0' } });
@@ -514,7 +598,8 @@ export default {
     }
     const email = await getSessionEmail(request, env);
     const auth = await getAuth(email, env);
-    if (!auth.canView) return html(INDEX_HTML.replace('</body>', `<script>window.__AUTH_REQUIRED__=true;</script></body>`));
-    return html(INDEX_HTML);
+    const clientConfig = `<script>window.__GOOGLE_CLIENT_ID__=${JSON.stringify(env.GOOGLE_OAUTH_CLIENT_ID || '')};</script>`;
+    if (!auth.canView) return html(INDEX_HTML.replace('</body>', `${clientConfig}<script>window.__AUTH_REQUIRED__=true;</script></body>`));
+    return html(INDEX_HTML.replace('</body>', `${clientConfig}</body>`));
   }
 };
