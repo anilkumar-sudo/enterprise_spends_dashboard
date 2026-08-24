@@ -7,6 +7,7 @@ const ADMIN_TABS = ['overview', 'forecast', 'cat-media', 'cat-services', 'cat-br
 const EDITOR_TABS = ADMIN_TABS.filter((tab) => tab !== 'access');
 const VIEWER_TABS = ['overview', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events'];
 const SESSION_TTL = 60 * 60 * 24 * 7;
+const SESSION_COOKIE = 'app_session';
 const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
 const GOOGLE_ISSUERS = new Set(['accounts.google.com', 'https://accounts.google.com']);
 
@@ -180,12 +181,13 @@ async function loadLiveState(env) {
   return buildLiveState({ detail: detail?.values || [], payments: payments?.values || [], vendors: vendors?.values || [], budget: budget?.values || [] }, env);
 }
 
-function json(data, status = 200) {
+function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store'
+      , ...extraHeaders
     }
   });
 }
@@ -278,25 +280,39 @@ async function saveAccessList(env, users) {
   }
 }
 
-async function getSessionEmail(request, env) {
-  const trustedHeaderEmail = normalizeEmail(
-    request.headers.get('cf-access-authenticated-user-email') ||
-    request.headers.get('x-authenticated-user-email') || ''
-  );
-  if (trustedHeaderEmail) return trustedHeaderEmail;
+function getCookie(request, name) {
   const cookie = request.headers.get('cookie') || '';
-  const match = cookie.match(/(?:^|;\s*)b2b_session=([^;]+)/);
-  if (!match) return '';
+  const match = cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+function sessionCookie(value, maxAge = SESSION_TTL, secure = true) {
+  return `${SESSION_COOKIE}=${encodeURIComponent(value)}; Path=/; HttpOnly;${secure ? ' Secure;' : ''} SameSite=Lax; Max-Age=${maxAge}`;
+}
+
+async function getSession(request, env) {
+  const sessionId = getCookie(request, SESSION_COOKIE);
+  if (!sessionId) return null;
   const db = getAuthDb(env);
   if (db) {
-    const result = await db.prepare(`SELECT users.email FROM sessions JOIN users ON users.id = sessions.user_id
-      WHERE sessions.id = ? AND sessions.expires_at > unixepoch()`).bind(decodeURIComponent(match[1])).first();
-    return normalizeEmail(result?.email);
+    const result = await db.prepare(`SELECT users.id, users.email, users.role, sessions.expires_at
+      FROM sessions JOIN users ON users.id = sessions.user_id
+      WHERE sessions.id = ? AND sessions.expires_at > unixepoch()`).bind(sessionId).first();
+    return result ? { id: result.id, email: normalizeEmail(result.email), role: result.role, expiresAt: result.expires_at } : null;
   }
   const store = getSessionStore(env);
-  if (!store) return '';
-  const session = await store.get(`b2b:session:${decodeURIComponent(match[1])}`, 'json');
-  return normalizeEmail(session?.email);
+  if (!store) return null;
+  const session = await store.get(`app:session:${sessionId}`, 'json');
+  if (!session || !session.expiresAt || session.expiresAt <= Math.floor(Date.now() / 1000)) return null;
+  return { ...session, email: normalizeEmail(session.email) };
+}
+
+async function getSessionAuth(request, env) {
+  const session = await getSession(request, env);
+  if (!session) return { session: null, auth: await getAuth('', env) };
+  const auth = await getAuth(session.email, env);
+  if (!auth.canView || (session.role && session.role !== auth.role)) return { session: null, auth: await getAuth('', env) };
+  return { session, auth };
 }
 
 async function getAuth(email, env) {
@@ -332,7 +348,8 @@ function decodeJwtPart(value) {
 }
 
 async function verifyGoogleIdToken(token, env) {
-  if (!env.GOOGLE_OAUTH_CLIENT_ID) throw new Error('Google Identity Services client ID is not configured');
+  const clientId = env.GOOGLE_CLIENT_ID || env.GOOGLE_OAUTH_CLIENT_ID;
+  if (!clientId) throw new Error('Google Identity Services client ID is not configured');
   const parts = String(token || '').split('.');
   if (parts.length !== 3) throw new Error('Invalid Google ID token');
   const [encodedHeader, encodedPayload, encodedSignature] = parts;
@@ -340,7 +357,7 @@ async function verifyGoogleIdToken(token, env) {
   const claims = decodeJwtPart(encodedPayload);
   if (header.alg !== 'RS256' || !header.kid) throw new Error('Unsupported Google ID token signature');
   if (!GOOGLE_ISSUERS.has(claims.iss)) throw new Error('Invalid Google ID token issuer');
-  if (claims.aud !== env.GOOGLE_OAUTH_CLIENT_ID) throw new Error('Invalid Google ID token audience');
+  if (claims.aud !== clientId) throw new Error('Invalid Google client ID or token audience');
   const now = Math.floor(Date.now() / 1000);
   if (!claims.exp || claims.exp <= now || (claims.nbf && claims.nbf > now + 60)) throw new Error('Expired Google ID token');
   const jwksResponse = await fetch(GOOGLE_JWKS_URL, { cf: { cacheTtl: 3600, cacheEverything: true } });
@@ -380,38 +397,45 @@ async function createSessionForGoogleUser(env, claims) {
   } else {
     const store = getSessionStore(env);
     if (!store) throw new Error('Session storage is not configured');
-    await store.put(`b2b:session:${sessionId}`, JSON.stringify({ email: claims.email }), { expirationTtl: SESSION_TTL });
+    await store.put(`app:session:${sessionId}`, JSON.stringify({ id: claims.sub, email: claims.email, role: auth.role, expiresAt: Math.floor(Date.now() / 1000) + SESSION_TTL }), { expirationTtl: SESSION_TTL });
   }
   return sessionId;
 }
 
-async function handleAuth(request, env, url) {
-  if (url.pathname === '/auth/google') {
+function authProfile(auth, session) {
+  return { id: session?.id || auth.email, email: auth.email, role: auth.role, canView: auth.canView, canEdit: auth.canEdit, isAdmin: auth.isAdmin, visibleTabs: auth.visibleTabs };
+}
+
+async function handleSessionAuth(request, env, url) {
+  if (url.pathname === '/api/auth/google') {
     if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
-    const origin = request.headers.get('origin');
-    if (origin && origin !== url.origin) return json({ ok: false, error: 'Invalid request origin' }, 403);
     try {
       const payload = await request.json();
+      if (!payload?.credential) return json({ ok: false, error: 'Google credential is required' }, 400);
       const claims = await verifyGoogleIdToken(payload.credential, env);
       const sessionId = await createSessionForGoogleUser(env, claims);
-      return json({ ok: true, redirectTo: typeof payload.returnTo === 'string' && payload.returnTo.startsWith('/') ? payload.returnTo : '/', email: claims.email });
+      const auth = await getAuth(claims.email, env);
+      return json({ ok: true, user: authProfile(auth, { id: claims.sub }) }, 200, { 'set-cookie': sessionCookie(sessionId, SESSION_TTL, url.protocol === 'https:') });
     } catch (error) {
       return json({ ok: false, error: error.message || 'Google sign-in failed' }, 401);
     }
   }
 
-  if (url.pathname === '/auth/login') {
-    return html('<h1>Use the Google sign-in button</h1><p>Return to the dashboard and use Sign in with Google.</p>', 400);
+  if (url.pathname === '/api/auth/me') {
+    if (request.method !== 'GET') return json({ ok: false, error: 'Method not allowed' }, 405);
+    const { session, auth } = await getSessionAuth(request, env);
+    if (!session) return json({ ok: false, error: 'Missing or expired session' }, 401);
+    return json({ ok: true, user: authProfile(auth, session) });
   }
 
-  if (url.pathname === '/auth/logout') {
-    const cookie = request.headers.get('cookie') || '';
-    const match = cookie.match(/(?:^|;\s*)b2b_session=([^;]+)/);
+  if (url.pathname === '/api/auth/logout') {
+    if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
+    const sessionId = getCookie(request, SESSION_COOKIE);
     const db = getAuthDb(env);
-    if (db && match) await db.prepare('DELETE FROM sessions WHERE id = ?').bind(decodeURIComponent(match[1])).run();
+    if (db && sessionId) await db.prepare('DELETE FROM sessions WHERE id = ?').bind(sessionId).run();
     const store = getSessionStore(env);
-    if (store && match) await store.delete(`b2b:session:${decodeURIComponent(match[1])}`);
-    return new Response(null, { status: 302, headers: { location: '/', 'set-cookie': 'b2b_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0' } });
+    if (store && sessionId) await store.delete(`app:session:${sessionId}`);
+    return new Response(null, { status: 204, headers: { 'cache-control': 'no-store', 'set-cookie': sessionCookie('', 0, url.protocol === 'https:') } });
   }
   return null;
 }
@@ -480,10 +504,9 @@ function getDashboardData(state) {
 }
 
 async function handleApi(request, env) {
-  const email = await getSessionEmail(request, env);
-  const auth = await getAuth(email, env);
+  const { session, auth } = await getSessionAuth(request, env);
   if (!auth.canView) {
-    return json({ ok: false, error: email ? 'You do not have access to this dashboard.' : 'Authentication required.', auth, loginUrl: loginUrl(request) }, email ? 403 : 401);
+    return json({ ok: false, error: session ? 'You do not have access to this dashboard.' : 'Authentication required.', auth, loginUrl: loginUrl(request) }, session ? 403 : 401);
   }
 
   if (new URL(request.url).pathname === '/api/access') {
@@ -590,15 +613,14 @@ async function handleApi(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const authResponse = await handleAuth(request, env, url);
-    if (authResponse) return authResponse;
+    const sessionAuthResponse = await handleSessionAuth(request, env, url);
+    if (sessionAuthResponse) return sessionAuthResponse;
     if (url.pathname === '/api/access') return handleApi(request, env);
     if (url.pathname === '/api' || url.pathname === '/api/') {
       return handleApi(request, env);
     }
-    const email = await getSessionEmail(request, env);
-    const auth = await getAuth(email, env);
-    const clientConfig = `<script>window.__GOOGLE_CLIENT_ID__=${JSON.stringify(env.GOOGLE_OAUTH_CLIENT_ID || '')};</script>`;
+    const { auth } = await getSessionAuth(request, env);
+    const clientConfig = `<script>window.__GOOGLE_CLIENT_ID__=${JSON.stringify(env.GOOGLE_CLIENT_ID || env.GOOGLE_OAUTH_CLIENT_ID || '')};</script>`;
     if (!auth.canView) return html(INDEX_HTML.replace('</body>', `${clientConfig}<script>window.__AUTH_REQUIRED__=true;</script></body>`));
     return html(INDEX_HTML.replace('</body>', `${clientConfig}</body>`));
   }

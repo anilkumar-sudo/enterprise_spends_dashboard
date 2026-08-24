@@ -1110,7 +1110,7 @@
     <div class="role-pill editor" id="auth-role-pill">Editor</div>
     <div id="google-signin-button" hidden></div>
     <button class="export-btn" id="auth-login-btn" onclick="startGoogleSignIn()" hidden>Sign in with Google</button>
-    <button class="export-btn" id="auth-logout-btn" onclick="window.location.href='/auth/logout'" hidden>Sign out</button>
+    <button class="export-btn" id="auth-logout-btn" onclick="logout()" hidden>Sign out</button>
     <div class="icon-btn" onclick="toggleActivityPanel()" title="Recent activity">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11h2.6l1.7-4 2.4 6 2.1-5H14"/><path d="M2 3h12"/></svg>
     </div>
@@ -1123,10 +1123,10 @@
 
 <!-- MAIN -->
 <main class="main">
-<div class="access-banner" id="access-banner">
+<div class="access-banner show" id="access-banner">
   <div>
-    <div class="access-banner-title" id="access-banner-title">View-only access</div>
-    <div class="access-banner-copy" id="access-banner-copy">You can review the dashboard, but only approved marketing operators can edit spends, vendors, budgets, and reallocations.</div>
+    <div class="access-banner-title" id="access-banner-title">Checking sign-in…</div>
+    <div class="access-banner-copy" id="access-banner-copy">Restoring your secure workspace session.</div>
   </div>
   <div class="access-banner-user" id="access-banner-user"></div>
 </div>
@@ -1735,6 +1735,8 @@ let state = {
 let forecastScenario = 'base';
 let selectedForecastMonth = null;
 let forecastInputsExpanded = true;
+let authRestoring = true;
+let authLoggingOut = false;
 
 function inferVendorRecord(name, category) {
   const meta = VENDOR_META[name] || {};
@@ -1862,7 +1864,6 @@ function saveState() {
     sourceDataVersion: state.sourceDataVersion,
     actionItems: state.actionItems,
     activityLog: state.activityLog,
-    auth: state.auth,
     nextId: state.nextId
   }));
 }
@@ -1922,24 +1923,40 @@ async function hydrateFromBackend() {
       isAdmin: true,
       source: 'local-preview'
     };
+    authRestoring = false;
     applyAuthUI();
     return;
   }
 
+  authRestoring = true;
+  applyAuthUI();
   try {
-    const response = await fetch(APP_CONFIG.backendUrl, {
+    const sessionResponse = await fetch(`${APP_CONFIG.backendUrl}/auth/me`, {
       method: 'GET',
       credentials: 'include',
       headers: { 'Accept': 'application/json' }
     });
 
-    if (response.status === 401) {
-      const unauthenticated = await response.json().catch(() => ({}));
-      state.auth = { email: '', role: 'restricted', canEdit: false, canView: false, isAdmin: false, visibleTabs: [], source: 'unauthenticated', loginUrl: unauthenticated.loginUrl || '/auth/login' };
+    if (sessionResponse.status === 401) {
+      state.auth = { email: '', role: 'restricted', canEdit: false, canView: false, isAdmin: false, visibleTabs: [], source: 'unauthenticated' };
+      authRestoring = false;
       applyAuthUI();
       return;
     }
-    if (!response.ok) throw new Error('Failed to verify access');
+    if (!sessionResponse.ok) throw new Error('Failed to restore session');
+
+    const sessionPayload = await sessionResponse.json();
+    const user = sessionPayload.user || {};
+    state.auth = {
+      email: user.email || '', role: user.role || 'restricted', canEdit: Boolean(user.canEdit), canView: Boolean(user.canView),
+      isAdmin: Boolean(user.isAdmin), visibleTabs: Array.isArray(user.visibleTabs) ? user.visibleTabs : [], source: 'workspace'
+    };
+    applyAuthUI();
+
+    const response = await fetch(APP_CONFIG.backendUrl, {
+      method: 'GET', credentials: 'include', headers: { 'Accept': 'application/json' }
+    });
+    if (!response.ok) throw new Error('Failed to load dashboard data');
 
     const payload = await response.json();
     if (payload) applyBackendPayload(payload);
@@ -1956,6 +1973,7 @@ async function hydrateFromBackend() {
     showToast('Workspace access could not be verified.');
   }
 
+  authRestoring = false;
   applyAuthUI();
 }
 
@@ -2001,17 +2019,41 @@ function startGoogleSignIn() {
 async function handleGoogleCredential(response) {
   if (!response?.credential) return showToast('Google sign-in did not return an ID token.');
   try {
-    const result = await fetch('/auth/google', {
+    const result = await fetch('/api/auth/google', {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({ credential: response.credential, returnTo: window.location.pathname })
+      body: JSON.stringify({ credential: response.credential })
     });
     const payload = await result.json().catch(() => ({}));
     if (!result.ok || payload.ok === false) throw new Error(payload.error || 'Google sign-in failed');
-    window.location.assign(payload.redirectTo || '/');
+    if (payload.user) {
+      state.auth = {
+        email: payload.user.email || '', role: payload.user.role || 'restricted', canEdit: Boolean(payload.user.canEdit),
+        canView: Boolean(payload.user.canView), isAdmin: Boolean(payload.user.isAdmin), visibleTabs: payload.user.visibleTabs || [], source: 'workspace'
+      };
+    }
+    window.location.assign('/');
   } catch (error) {
     showToast(error.message || 'Google sign-in failed.');
+  }
+}
+
+async function logout() {
+  if (authLoggingOut) return;
+  authLoggingOut = true;
+  try {
+    const response = await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', headers: { Accept: 'application/json' } });
+    if (!response.ok) throw new Error('Sign out failed');
+    localStorage.removeItem('cult_mkt_v2');
+    state.auth = { email: '', role: 'restricted', canEdit: false, canView: false, isAdmin: false, visibleTabs: [], source: 'unauthenticated' };
+    authRestoring = false;
+    applyAuthUI();
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  } catch (error) {
+    showToast(error.message || 'Sign out failed.');
+  } finally {
+    authLoggingOut = false;
   }
 }
 
@@ -2090,6 +2132,13 @@ function applyAuthUI() {
   const bannerUser = document.getElementById('access-banner-user');
   const auth = state.auth || { role: 'viewer', canEdit: false, canView: false };
 
+  if (authRestoring) {
+    if (banner) banner.classList.add('show');
+    if (bannerTitle) bannerTitle.textContent = 'Checking sign-in…';
+    if (bannerCopy) bannerCopy.textContent = 'Restoring your secure workspace session.';
+    if (bannerUser) bannerUser.textContent = '';
+  }
+
   if (rolePill) {
     rolePill.className = 'role-pill ' + (auth.isAdmin || auth.canEdit ? 'editor' : 'viewer');
     rolePill.textContent = !auth.canView ? 'Restricted' : auth.isAdmin ? 'Admin access' : auth.canEdit ? 'Editor access' : 'View only';
@@ -2097,16 +2146,20 @@ function applyAuthUI() {
   const loginButton = document.getElementById('auth-login-btn');
   const logoutButton = document.getElementById('auth-logout-btn');
   const googleButton = document.getElementById('google-signin-button');
-  if (loginButton) loginButton.hidden = Boolean(auth.canView) || Boolean(window.__GOOGLE_CLIENT_ID__);
-  if (logoutButton) logoutButton.hidden = !Boolean(auth.canView);
+  if (loginButton) loginButton.hidden = authRestoring || Boolean(auth.canView) || Boolean(window.__GOOGLE_CLIENT_ID__);
+  if (logoutButton) logoutButton.hidden = authRestoring || !Boolean(auth.canView);
   if (googleButton) {
-    googleButton.hidden = Boolean(auth.canView) || !window.__GOOGLE_CLIENT_ID__;
+    googleButton.hidden = authRestoring || Boolean(auth.canView) || !window.__GOOGLE_CLIENT_ID__;
     if (!googleButton.hidden) {
       initGoogleIdentity();
       if (!googleIdentityReady) setTimeout(initGoogleIdentity, 300);
     }
   }
-  if (!auth.canView && auth.source === 'unauthenticated') {
+  if (authRestoring) {
+    applyAccessVisibility();
+    return;
+  }
+  if (!authRestoring && !auth.canView && auth.source === 'unauthenticated') {
     if (bannerTitle) bannerTitle.textContent = 'Sign in required';
     if (bannerCopy) bannerCopy.textContent = 'Sign in with your verified @curefit.com Google account to continue.';
     if (loginButton) loginButton.hidden = false;
