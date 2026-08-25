@@ -1,13 +1,15 @@
-const EDITOR_EMAILS = [
-  'nikhil.zutshi@curefit.com',
-  'divya.agarwal@curefit.com',
-  'alvina.davidson@curefit.com',
-  'arjit.shukla@curefit.com',
-  'anil.kumar@curefit.com'
+const DEFAULT_ACCESS = [
+  { email: 'anil.kumar@curefit.com', role: 'admin' },
+  { email: 'nikhil.zutshi@curefit.com', role: 'admin' }
 ];
-const VIEWER_DOMAINS = ['curefit.com', 'cultfit.in'];
-const EDITOR_TABS = ['overview', 'forecast', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events', 'spends', 'payments', 'vendors', 'budget'];
+const ALLOWED_DOMAIN = 'curefit.com';
+const ADMIN_TABS = ['overview', 'forecast', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events', 'spends', 'payments', 'vendors', 'budget', 'access'];
+const EDITOR_TABS = ADMIN_TABS.filter((tab) => tab !== 'access');
 const VIEWER_TABS = ['overview', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events'];
+const SESSION_TTL = 60 * 60 * 24 * 7;
+const SESSION_COOKIE = 'app_session';
+const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
+const GOOGLE_ISSUERS = new Set(['accounts.google.com', 'https://accounts.google.com']);
 
 const INITIAL_STATE = __INITIAL_STATE__;
 const INDEX_HTML = __INDEX_HTML__;
@@ -179,12 +181,13 @@ async function loadLiveState(env) {
   return buildLiveState({ detail: detail?.values || [], payments: payments?.values || [], vendors: vendors?.values || [], budget: budget?.values || [] }, env);
 }
 
-function json(data, status = 200) {
+function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store'
+      , ...extraHeaders
     }
   });
 }
@@ -199,26 +202,252 @@ function html(body, status = 200) {
   });
 }
 
-function getUserEmail(request) {
-  return (
-    request.headers.get('cf-access-authenticated-user-email') ||
-    request.headers.get('x-authenticated-user-email') ||
-    ''
-  ).trim().toLowerCase();
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
 }
 
-function getAuth(email) {
-  const domain = email.includes('@') ? email.split('@').pop() : '';
-  const canView = Boolean(email) && VIEWER_DOMAINS.includes(domain);
-  const canEdit = canView && EDITOR_EMAILS.includes(email);
+function getSessionStore(env) {
+  return env.ACCESS_STORE && typeof env.ACCESS_STORE.get === 'function' ? env.ACCESS_STORE : null;
+}
+
+function getAuthDb(env) {
+  return env.AUTH_DB && typeof env.AUTH_DB.prepare === 'function' ? env.AUTH_DB : null;
+}
+
+async function getLegacyAccessList(env) {
+  const store = getSessionStore(env);
+  if (!store) return structuredClone(DEFAULT_ACCESS);
+  const raw = await store.get('b2b:access:users');
+  if (!raw) return structuredClone(DEFAULT_ACCESS);
+  try {
+    const users = JSON.parse(raw);
+    return Array.isArray(users) ? withDefaultAdmins(users) : structuredClone(DEFAULT_ACCESS);
+  } catch {
+    return structuredClone(DEFAULT_ACCESS);
+  }
+}
+
+function withDefaultAdmins(users) {
+  const next = Array.isArray(users) ? users.map((user) => ({ email: normalizeEmail(user.email), role: user.role })) : [];
+  const emails = new Set(next.map((user) => user.email));
+  for (const admin of DEFAULT_ACCESS) {
+    const email = normalizeEmail(admin.email);
+    if (!emails.has(email)) next.push({ email, role: 'admin' });
+  }
+  return next;
+}
+
+async function getD1Users(env) {
+  const db = getAuthDb(env);
+  if (!db) return null;
+  const result = await db.prepare('SELECT email, role FROM users ORDER BY email').all();
+  return result.results || [];
+}
+
+async function ensureD1Users(env) {
+  const db = getAuthDb(env);
+  if (!db) return;
+  const existing = await getD1Users(env);
+  if (existing.length) return;
+  const seed = await getLegacyAccessList(env);
+  for (const user of seed) {
+    await db.prepare(`INSERT INTO users (id, google_sub, email, role, email_verified, hosted_domain, created_at, updated_at, last_login_at)
+      VALUES (?, ?, ?, ?, 1, ?, unixepoch(), unixepoch(), NULL)
+      ON CONFLICT(email) DO UPDATE SET role = excluded.role, updated_at = unixepoch()`)
+      .bind(`legacy:${normalizeEmail(user.email)}`, `legacy:${normalizeEmail(user.email)}`, normalizeEmail(user.email), user.role, ALLOWED_DOMAIN)
+      .run();
+  }
+}
+
+async function getAccessList(env) {
+  await ensureD1Users(env);
+  const d1Users = await getD1Users(env);
+  if (d1Users) return withDefaultAdmins(d1Users);
+  const users = await getLegacyAccessList(env);
+  const store = getSessionStore(env);
+  if (store && !(await store.get('b2b:access:users'))) await store.put('b2b:access:users', JSON.stringify(users));
+  return users;
+}
+
+async function saveAccessList(env, users) {
+  const store = getSessionStore(env);
+  if (store) await store.put('b2b:access:users', JSON.stringify(users));
+  const db = getAuthDb(env);
+  if (!db) return;
+  const existing = await getD1Users(env);
+  const wanted = new Set(users.map((user) => normalizeEmail(user.email)));
+  for (const user of users) {
+    await db.prepare(`INSERT INTO users (id, google_sub, email, role, email_verified, hosted_domain, created_at, updated_at, last_login_at)
+      VALUES (?, ?, ?, ?, 1, ?, unixepoch(), unixepoch(), NULL)
+      ON CONFLICT(email) DO UPDATE SET role = excluded.role, updated_at = unixepoch()`)
+      .bind(`managed:${normalizeEmail(user.email)}`, `managed:${normalizeEmail(user.email)}`, normalizeEmail(user.email), user.role, ALLOWED_DOMAIN)
+      .run();
+  }
+  for (const user of existing) {
+    if (!wanted.has(normalizeEmail(user.email))) {
+      await db.prepare('DELETE FROM users WHERE email = ?').bind(normalizeEmail(user.email)).run();
+    }
+  }
+}
+
+function getCookie(request, name) {
+  const cookie = request.headers.get('cookie') || '';
+  const match = cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+function sessionCookie(value, maxAge = SESSION_TTL, secure = true) {
+  return `${SESSION_COOKIE}=${encodeURIComponent(value)}; Path=/; HttpOnly;${secure ? ' Secure;' : ''} SameSite=Lax; Max-Age=${maxAge}`;
+}
+
+async function getSession(request, env) {
+  const sessionId = getCookie(request, SESSION_COOKIE);
+  if (!sessionId) return null;
+  const db = getAuthDb(env);
+  if (db) {
+    const result = await db.prepare(`SELECT users.id, users.email, users.role, sessions.expires_at
+      FROM sessions JOIN users ON users.id = sessions.user_id
+      WHERE sessions.id = ? AND sessions.expires_at > unixepoch()`).bind(sessionId).first();
+    return result ? { id: result.id, email: normalizeEmail(result.email), role: result.role, expiresAt: result.expires_at } : null;
+  }
+  const store = getSessionStore(env);
+  if (!store) return null;
+  const session = await store.get(`app:session:${sessionId}`, 'json');
+  if (!session || !session.expiresAt || session.expiresAt <= Math.floor(Date.now() / 1000)) return null;
+  return { ...session, email: normalizeEmail(session.email) };
+}
+
+async function getSessionAuth(request, env) {
+  const session = await getSession(request, env);
+  if (!session) return { session: null, auth: await getAuth('', env) };
+  const auth = await getAuth(session.email, env);
+  if (!auth.canView || (session.role && session.role !== auth.role)) return { session: null, auth: await getAuth('', env) };
+  return { session, auth };
+}
+
+async function getAuth(email, env) {
+  const normalized = normalizeEmail(email);
+  const domain = normalized.includes('@') ? normalized.split('@').pop() : '';
+  const users = await getAccessList(env);
+  const record = users.find((user) => normalizeEmail(user.email) === normalized);
+  const canView = Boolean(normalized) && domain === ALLOWED_DOMAIN && Boolean(record);
+  const role = canView ? record.role : '';
+  const isAdmin = role === 'admin';
+  const canEdit = canView && (role === 'editor' || isAdmin);
   return {
-    email,
+    email: normalized,
     domain,
+    role: canView ? role : 'restricted',
     canView,
-    role: canEdit ? 'editor' : 'viewer',
     canEdit,
-    visibleTabs: canEdit ? EDITOR_TABS : VIEWER_TABS
+    isAdmin,
+    visibleTabs: isAdmin ? ADMIN_TABS : canEdit ? EDITOR_TABS : canView ? VIEWER_TABS : []
   };
+}
+
+function redirect(url) {
+  return new Response(null, { status: 302, headers: { location: url, 'cache-control': 'no-store' } });
+}
+
+function loginUrl(request) {
+  return `/auth/login?returnTo=${encodeURIComponent(new URL(request.url).pathname)}`;
+}
+
+function decodeJwtPart(value) {
+  return JSON.parse(new TextDecoder().decode(base64UrlDecode(value)));
+}
+
+async function verifyGoogleIdToken(token, env) {
+  const clientId = env.GOOGLE_CLIENT_ID || env.GOOGLE_OAUTH_CLIENT_ID;
+  if (!clientId) throw new Error('Google Identity Services client ID is not configured');
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3) throw new Error('Invalid Google ID token');
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  const header = decodeJwtPart(encodedHeader);
+  const claims = decodeJwtPart(encodedPayload);
+  if (header.alg !== 'RS256' || !header.kid) throw new Error('Unsupported Google ID token signature');
+  if (!GOOGLE_ISSUERS.has(claims.iss)) throw new Error('Invalid Google ID token issuer');
+  if (claims.aud !== clientId) throw new Error('Invalid Google client ID or token audience');
+  const now = Math.floor(Date.now() / 1000);
+  if (!claims.exp || claims.exp <= now || (claims.nbf && claims.nbf > now + 60)) throw new Error('Expired Google ID token');
+  const jwksResponse = await fetch(GOOGLE_JWKS_URL, { cf: { cacheTtl: 3600, cacheEverything: true } });
+  if (!jwksResponse.ok) throw new Error('Could not load Google signing keys');
+  const jwks = await jwksResponse.json();
+  const jwk = (jwks.keys || []).find((key) => key.kid === header.kid);
+  if (!jwk) throw new Error('Google signing key not found');
+  const publicKey = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+  const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', publicKey, base64UrlDecode(encodedSignature), new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`));
+  if (!valid) throw new Error('Invalid Google ID token signature');
+  const email = normalizeEmail(claims.email);
+  if (!claims.sub || !email || claims.email_verified !== true || claims.hd !== ALLOWED_DOMAIN || !email.endsWith(`@${ALLOWED_DOMAIN}`)) {
+    throw new Error('Only verified @curefit.com Google Workspace accounts are allowed');
+  }
+  return { ...claims, email };
+}
+
+async function createSessionForGoogleUser(env, claims) {
+  const auth = await getAuth(claims.email, env);
+  if (!auth.canView) throw new Error('Your @curefit.com account is not on the dashboard access list. Contact an administrator.');
+  const sessionId = crypto.randomUUID();
+  const db = getAuthDb(env);
+  if (db) {
+    const existing = await db.prepare('SELECT id FROM users WHERE email = ? OR google_sub = ? LIMIT 1').bind(claims.email, claims.sub).first();
+    const userId = existing?.id || claims.sub;
+    if (existing) {
+      await db.prepare(`UPDATE users SET google_sub = ?, email = ?, role = ?, email_verified = 1, hosted_domain = ?, updated_at = unixepoch(), last_login_at = unixepoch()
+        WHERE id = ?`).bind(claims.sub, claims.email, auth.role, ALLOWED_DOMAIN, userId).run();
+    } else {
+      await db.prepare(`INSERT INTO users (id, google_sub, email, role, email_verified, hosted_domain, created_at, updated_at, last_login_at)
+        VALUES (?, ?, ?, ?, 1, ?, unixepoch(), unixepoch(), unixepoch())`)
+        .bind(userId, claims.sub, claims.email, auth.role, ALLOWED_DOMAIN).run();
+    }
+    await db.prepare('INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES (?, ?, unixepoch() + ?, unixepoch())')
+      .bind(sessionId, userId, SESSION_TTL)
+      .run();
+  } else {
+    const store = getSessionStore(env);
+    if (!store) throw new Error('Session storage is not configured');
+    await store.put(`app:session:${sessionId}`, JSON.stringify({ id: claims.sub, email: claims.email, role: auth.role, expiresAt: Math.floor(Date.now() / 1000) + SESSION_TTL }), { expirationTtl: SESSION_TTL });
+  }
+  return sessionId;
+}
+
+function authProfile(auth, session) {
+  return { id: session?.id || auth.email, email: auth.email, role: auth.role, canView: auth.canView, canEdit: auth.canEdit, isAdmin: auth.isAdmin, visibleTabs: auth.visibleTabs };
+}
+
+async function handleSessionAuth(request, env, url) {
+  if (url.pathname === '/api/auth/google') {
+    if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
+    try {
+      const payload = await request.json();
+      if (!payload?.credential) return json({ ok: false, error: 'Google credential is required' }, 400);
+      const claims = await verifyGoogleIdToken(payload.credential, env);
+      const sessionId = await createSessionForGoogleUser(env, claims);
+      const auth = await getAuth(claims.email, env);
+      return json({ ok: true, user: authProfile(auth, { id: claims.sub }) }, 200, { 'set-cookie': sessionCookie(sessionId, SESSION_TTL, url.protocol === 'https:') });
+    } catch (error) {
+      return json({ ok: false, error: error.message || 'Google sign-in failed' }, 401);
+    }
+  }
+
+  if (url.pathname === '/api/auth/me') {
+    if (request.method !== 'GET') return json({ ok: false, error: 'Method not allowed' }, 405);
+    const { session, auth } = await getSessionAuth(request, env);
+    if (!session) return json({ ok: false, error: 'Missing or expired session' }, 401);
+    return json({ ok: true, user: authProfile(auth, session) });
+  }
+
+  if (url.pathname === '/api/auth/logout') {
+    if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
+    const sessionId = getCookie(request, SESSION_COOKIE);
+    const db = getAuthDb(env);
+    if (db && sessionId) await db.prepare('DELETE FROM sessions WHERE id = ?').bind(sessionId).run();
+    const store = getSessionStore(env);
+    if (store && sessionId) await store.delete(`app:session:${sessionId}`);
+    return new Response(null, { status: 204, headers: { 'cache-control': 'no-store', 'set-cookie': sessionCookie('', 0, url.protocol === 'https:') } });
+  }
+  return null;
 }
 
 async function loadState(env) {
@@ -285,21 +514,42 @@ function getDashboardData(state) {
 }
 
 async function handleApi(request, env) {
-  const email = getUserEmail(request);
-  const auth = getAuth(email);
+  const { session, auth } = await getSessionAuth(request, env);
+  if (!auth.canView) {
+    return json({ ok: false, error: session ? 'You do not have access to this dashboard.' : 'Authentication required.', auth, loginUrl: loginUrl(request) }, session ? 403 : 401);
+  }
+
+  if (new URL(request.url).pathname === '/api/access') {
+    if (!auth.isAdmin) return json({ ok: false, error: 'Administrator access required.', auth }, 403);
+    if (request.method === 'GET') return json({ ok: true, access: await getAccessList(env), auth });
+    if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed' }, 405);
+    const payload = await request.json();
+    const action = payload.action || '';
+    const users = await getAccessList(env);
+    const emailToChange = normalizeEmail(payload.email);
+    if (!emailToChange.endsWith(`@${ALLOWED_DOMAIN}`)) return json({ ok: false, error: 'Only @curefit.com accounts can be added.' }, 400);
+    if (!['admin', 'editor', 'viewer'].includes(payload.role)) return json({ ok: false, error: 'Role must be admin, editor, or viewer.' }, 400);
+    if (action === 'upsertAccess') {
+      const existing = users.find((user) => normalizeEmail(user.email) === emailToChange);
+      if (existing) existing.role = payload.role;
+      else users.push({ email: emailToChange, role: payload.role });
+    } else if (action === 'removeAccess') {
+      if (emailToChange === auth.email) return json({ ok: false, error: 'You cannot remove your own access.' }, 400);
+      const remainingAdmins = users.filter((user) => user.role === 'admin' && normalizeEmail(user.email) !== emailToChange);
+      if (!remainingAdmins.length) return json({ ok: false, error: 'At least one administrator must remain.' }, 400);
+      const next = users.filter((user) => normalizeEmail(user.email) !== emailToChange);
+      users.splice(0, users.length, ...next);
+    } else {
+      return json({ ok: false, error: 'Unsupported access action.' }, 400);
+    }
+    await saveAccessList(env, users);
+    return json({ ok: true, access: users, auth });
+  }
   let state;
   try {
     state = await loadState(env);
   } catch (error) {
     return json({ ok: false, error: error.message || 'Live Google Sheet read failed', auth }, 502);
-  }
-
-  if (!auth.canView) {
-    return json({
-      ok: false,
-      error: 'You do not have access to this dashboard.',
-      auth
-    }, 403);
   }
 
   if (request.method === 'GET') {
@@ -373,9 +623,15 @@ async function handleApi(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const sessionAuthResponse = await handleSessionAuth(request, env, url);
+    if (sessionAuthResponse) return sessionAuthResponse;
+    if (url.pathname === '/api/access') return handleApi(request, env);
     if (url.pathname === '/api' || url.pathname === '/api/') {
       return handleApi(request, env);
     }
-    return html(INDEX_HTML);
+    const { auth } = await getSessionAuth(request, env);
+    const clientConfig = `<script>window.__GOOGLE_CLIENT_ID__=${JSON.stringify(env.GOOGLE_CLIENT_ID || env.GOOGLE_OAUTH_CLIENT_ID || '')};</script>`;
+    if (!auth.canView) return html(INDEX_HTML.replace('</body>', `${clientConfig}<script>window.__AUTH_REQUIRED__=true;</script></body>`));
+    return html(INDEX_HTML.replace('</body>', `${clientConfig}</body>`));
   }
 };

@@ -72,7 +72,7 @@ npm run deploy
 
 The Worker config is set up to:
 
-- deploy the Worker named `cult-enterprise-marketing`
+- deploy the Worker named `b2b-enterprise-spends-dashboard`
 - serve on its Cloudflare `workers.dev` URL until a custom domain is attached
 - read the configured Google Sheets source live on each authenticated request
 

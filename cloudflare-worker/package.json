@@ -6,7 +6,9 @@
     "build": "node build-worker.mjs",
     "deploy": "npm run build && wrangler deploy",
     "check": "wrangler check",
-    "dev": "npm run build && wrangler dev"
+    "dev": "npm run build && wrangler dev",
+    "lint": "node --check worker.template.js && node --check worker.js",
+    "test": "node --test"
   },
   "devDependencies": {
     "wrangler": "^4.21.0"

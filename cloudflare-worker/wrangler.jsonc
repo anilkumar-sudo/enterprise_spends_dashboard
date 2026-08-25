@@ -5,8 +5,23 @@
   "compatibility_date": "2026-05-26",
   "workers_dev": true,
   "observability": {
-    "enabled": true
+    "enabled": false
   },
+  "kv_namespaces": [
+    {
+      "binding": "ACCESS_STORE",
+      "id": "93961d4f19324dd6b200ae5744a9befa"
+    }
+  ],
+  // Infra must add the provisioned D1 database ID before production deploy:
+  // {
+  //   "d1_databases": [{
+  //     "binding": "AUTH_DB",
+  //     "database_name": "b2b-enterprise-spends-auth",
+  //     "database_id": "<AUTH_DB_ID>",
+  //     "migrations_dir": "./migrations"
+  //   }]
+  // },
   "vars": {
     "GOOGLE_LIVE_SYNC": "true",
     "GOOGLE_SHEET_ID": "1Pbr5E2EOmpI0WcpNfmlO5-Hr_SX9u4lqfFSXqrIQElg",

@@ -1,3 +1,7 @@
 # Copy to .dev.vars for local live-Sheet testing. Never commit .dev.vars.
 GOOGLE_SERVICE_ACCOUNT_EMAIL=service-account@your-project.iam.gserviceaccount.com
 GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\nREPLACE_WITH_PRIVATE_KEY\\n-----END PRIVATE KEY-----\\n"
+GOOGLE_CLIENT_ID=replace-with-google-web-client-id
+GOOGLE_OAUTH_CLIENT_SECRET=replace-with-the-same-oauth-client-secret
+GOOGLE_OAUTH_REDIRECT_URI=https://b2b-enterprise-spends-dashboard.cultfit.workers.dev/api/auth/callback
+# AUTH_DB is provided by the wrangler D1 binding after Infra provisions it.
