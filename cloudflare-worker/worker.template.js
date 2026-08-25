@@ -221,10 +221,20 @@ async function getLegacyAccessList(env) {
   if (!raw) return structuredClone(DEFAULT_ACCESS);
   try {
     const users = JSON.parse(raw);
-    return Array.isArray(users) ? users : structuredClone(DEFAULT_ACCESS);
+    return Array.isArray(users) ? withDefaultAdmins(users) : structuredClone(DEFAULT_ACCESS);
   } catch {
     return structuredClone(DEFAULT_ACCESS);
   }
+}
+
+function withDefaultAdmins(users) {
+  const next = Array.isArray(users) ? users.map((user) => ({ email: normalizeEmail(user.email), role: user.role })) : [];
+  const emails = new Set(next.map((user) => user.email));
+  for (const admin of DEFAULT_ACCESS) {
+    const email = normalizeEmail(admin.email);
+    if (!emails.has(email)) next.push({ email, role: 'admin' });
+  }
+  return next;
 }
 
 async function getD1Users(env) {
@@ -252,7 +262,7 @@ async function ensureD1Users(env) {
 async function getAccessList(env) {
   await ensureD1Users(env);
   const d1Users = await getD1Users(env);
-  if (d1Users) return d1Users;
+  if (d1Users) return withDefaultAdmins(d1Users);
   const users = await getLegacyAccessList(env);
   const store = getSessionStore(env);
   if (store && !(await store.get('b2b:access:users'))) await store.put('b2b:access:users', JSON.stringify(users));

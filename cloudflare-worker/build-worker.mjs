@@ -21,6 +21,17 @@ const indexHtml = rawIndexHtml
     `<script>${sourceSnapshotScript}</script>`
   );
 
+// Keep the source snapshot server-side only. The browser must receive data
+// through the authenticated /api endpoint so unauthenticated users cannot
+// inspect or export spend records from page source or localStorage.
+const publicIndexHtml = indexHtml.replace(
+  /<script>[\s\S]*?window\.CULT_SOURCE_SHEET_DATA\s*=\s*[\s\S]*?<\/script>/,
+  '<script>window.CULT_SOURCE_SHEET_DATA = null;</script>'
+).replace(
+  /const SEED = \[[\s\S]*?\];/,
+  'const SEED = [];'
+);
+
 const sourceWindow = {};
 Function('window', sourceSnapshotScript)(sourceWindow);
 const sourceData = sourceWindow.CULT_SOURCE_SHEET_DATA;
@@ -53,7 +64,7 @@ const initialState = {
 
 const worker = template
   .replace('__INITIAL_STATE__', JSON.stringify(initialState))
-  .replace('__INDEX_HTML__', JSON.stringify(indexHtml));
+  .replace('__INDEX_HTML__', JSON.stringify(publicIndexHtml));
 
 await fs.writeFile(outPath, worker, 'utf8');
 console.log('Built worker.js');

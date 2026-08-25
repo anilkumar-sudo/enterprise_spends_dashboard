@@ -20,6 +20,18 @@ test('GET /api/auth/me rejects a missing session', async () => {
   assert.equal((await response.json()).error, 'Missing or expired session');
 });
 
+test('GET /api does not expose dashboard data without a session', async () => {
+  const response = await worker.fetch(new Request('https://example.test/api'), env);
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).error, 'Authentication required.');
+});
+
+test('GET / does not embed spend records before sign-in', async () => {
+  const response = await worker.fetch(new Request('https://example.test/'), env);
+  assert.equal(response.status, 200);
+  assert.doesNotMatch(await response.text(), /CULT-ENT-0/);
+});
+
 test('POST /api/auth/google rejects an invalid ID token', async () => {
   const response = await worker.fetch(new Request('https://example.test/api/auth/google', {
     method: 'POST',
@@ -44,4 +56,14 @@ test('GET /api/auth/me restores a server-side KV session and role', async () => 
   const response = await worker.fetch(new Request('https://example.test/api/auth/me', { headers: { cookie: 'app_session=session-1' } }), { ...env, ACCESS_STORE: accessStore });
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true, user: { id: 'google-sub-1', email: 'anil.kumar@curefit.com', role: 'admin', canView: true, canEdit: true, isAdmin: true, visibleTabs: ['overview', 'forecast', 'cat-media', 'cat-services', 'cat-brand', 'cat-engagement', 'cat-events', 'spends', 'payments', 'vendors', 'budget', 'access'] } });
+});
+
+test('GET /api/auth/me restores the default admin when the access store is empty', async () => {
+  const accessStore = new FakeKV({
+    'b2b:access:users': JSON.stringify([]),
+    'app:session:session-2': JSON.stringify({ id: 'google-sub-2', email: 'anil.kumar@curefit.com', role: 'admin', expiresAt: Math.floor(Date.now() / 1000) + 60 })
+  });
+  const response = await worker.fetch(new Request('https://example.test/api/auth/me', { headers: { cookie: 'app_session=session-2' } }), { ...env, ACCESS_STORE: accessStore });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).user.isAdmin, true);
 });

@@ -1114,7 +1114,7 @@
     <div class="icon-btn" onclick="toggleActivityPanel()" title="Recent activity">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11h2.6l1.7-4 2.4 6 2.1-5H14"/><path d="M2 3h12"/></svg>
     </div>
-    <button class="export-btn" onclick="openExportModal()">
+    <button class="export-btn" id="export-report-btn" onclick="openExportModal()">
       <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 8l5 5 5-5M8 2v11"/></svg>
       Export Report
     </button>
@@ -2146,6 +2146,7 @@ function applyAuthUI() {
   const loginButton = document.getElementById('auth-login-btn');
   const logoutButton = document.getElementById('auth-logout-btn');
   const googleButton = document.getElementById('google-signin-button');
+  const exportButton = document.getElementById('export-report-btn');
   if (loginButton) loginButton.hidden = authRestoring || Boolean(auth.canView) || Boolean(window.__GOOGLE_CLIENT_ID__);
   if (logoutButton) logoutButton.hidden = authRestoring || !Boolean(auth.canView);
   if (googleButton) {
@@ -2155,6 +2156,7 @@ function applyAuthUI() {
       if (!googleIdentityReady) setTimeout(initGoogleIdentity, 300);
     }
   }
+  if (exportButton) exportButton.hidden = authRestoring || !Boolean(auth.canView);
   if (authRestoring) {
     applyAccessVisibility();
     return;
@@ -3588,6 +3590,10 @@ function globalSearch(query) {
 // EXPORT MODAL
 // ═══════════════════════════════════════════════════════════════════════
 function openExportModal() {
+  if (authRestoring || !state.auth?.canView) {
+    showToast('Sign in is required before exporting dashboard data.');
+    return;
+  }
   document.getElementById('export-modal').classList.add('show');
 }
 function closeExportModal() {
@@ -3595,6 +3601,10 @@ function closeExportModal() {
 }
 
 function exportSection(type) {
+  if (authRestoring || !state.auth?.canView) {
+    showToast('Sign in is required before exporting dashboard data.');
+    return;
+  }
   closeExportModal();
   let headers, rows, filename;
 
