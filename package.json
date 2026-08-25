@@ -1,0 +1,10 @@
+{
+  "name": "b2b-enterprise-spends-dashboard",
+  "private": true,
+  "scripts": {
+    "build": "npm --prefix cloudflare-worker run build",
+    "lint": "npm --prefix cloudflare-worker run lint",
+    "test": "npm --prefix cloudflare-worker test",
+    "deploy": "npm --prefix cloudflare-worker run build && npx wrangler deploy --config cloudflare-worker/wrangler.jsonc"
+  }
+}
