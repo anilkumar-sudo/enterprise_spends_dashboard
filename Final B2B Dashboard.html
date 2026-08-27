@@ -111,6 +111,8 @@
   }
   .role-pill.editor,.role-pill.viewer{color:var(--text);background:rgba(9,11,14,0.96);border-color:rgba(255,255,255,0.12);}
   .role-pill:hover{background:var(--cult-yellow);color:#0f1117;border-color:var(--cult-yellow);}
+  .role-pill-action{cursor:pointer;font:inherit;}
+  .role-pill-action:focus-visible{outline:2px solid var(--cult-yellow);outline-offset:2px;}
   .icon-btn{width:32px;height:32px;border-radius:999px;background:rgba(255,255,255,0.04);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:var(--ease);color:var(--text-2);}
   .icon-btn:hover{color:var(--text);}
   .export-btn{
@@ -1107,7 +1109,7 @@
     <span class="hdr-context" id="header-context">Track and optimize enterprise marketing spend for FY 2026–27</span>
   </div>
   <div class="hdr-actions">
-    <div class="role-pill editor" id="auth-role-pill">Editor</div>
+    <button class="role-pill role-pill-action editor" id="auth-role-pill" type="button" onclick="openAccessManagement()" aria-label="Open Access Management">Editor</button>
     <div id="google-signin-button" hidden></div>
     <button class="export-btn" id="auth-login-btn" onclick="startGoogleSignIn()" hidden>Sign in with Google</button>
     <button class="export-btn" id="auth-logout-btn" onclick="logout()" hidden>Sign out</button>
@@ -2144,7 +2146,7 @@ function applyAuthUI() {
   }
 
   if (rolePill) {
-    rolePill.className = 'role-pill ' + (auth.isAdmin || auth.canEdit ? 'editor' : 'viewer');
+    rolePill.className = 'role-pill role-pill-action ' + (auth.isAdmin || auth.canEdit ? 'editor' : 'viewer');
     rolePill.textContent = !auth.canView ? 'Restricted' : auth.isAdmin ? 'Admin access' : auth.canEdit ? 'Editor access' : 'View only';
   }
   const loginButton = document.getElementById('auth-login-btn');
@@ -2561,6 +2563,15 @@ function showPage(id, navEl) {
   document.getElementById('header-context').textContent = PAGE_CONTEXT[id] || ' ';
   window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
   renderPage(id);
+}
+
+function openAccessManagement() {
+  if (!state.auth?.isAdmin) {
+    showToast('Administrator access required.');
+    return;
+  }
+  const nav = document.querySelector('.nav-item[data-page="access"]');
+  showPage('access', nav || null);
 }
 
 function openForecastPage() {
