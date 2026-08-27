@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "b2b-enterprise-spends-dashboard",
+  "main": "cloudflare-worker/worker.js",
+  "compatibility_date": "2026-05-26",
+  "workers_dev": true,
+  "observability": {
+    "enabled": false
+  },
+  "kv_namespaces": [
+    {
+      "binding": "ACCESS_STORE",
+      "id": "93961d4f19324dd6b200ae5744a9befa"
+    }
+  ],
+  "vars": {
+    "GOOGLE_LIVE_SYNC": "true",
+    "GOOGLE_SHEET_ID": "1Pbr5E2EOmpI0WcpNfmlO5-Hr_SX9u4lqfFSXqrIQElg",
+    "GOOGLE_SHEET_SPEND_TAB": "Marketing Detail Spends",
+    "GOOGLE_SHEET_PAYMENTS_TAB": "Payments Tracker",
+    "GOOGLE_SHEET_VENDORS_TAB": "Vendors & Agencies",
+    "GOOGLE_SHEET_BUDGET_TAB": "Budget"
+  }
+}
