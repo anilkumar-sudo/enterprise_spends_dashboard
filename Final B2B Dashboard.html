@@ -2088,6 +2088,10 @@ function ensureEditorAccess() {
 
 function getVisibleTabs() {
   const auth = state.auth || {};
+  // Admin status is authoritative for the full admin navigation. This also
+  // recovers the Access Management tab if an older session returned an
+  // incomplete visibleTabs array.
+  if (auth.isAdmin) return [...ADMIN_VISIBLE_TABS];
   if (Array.isArray(auth.visibleTabs) && auth.visibleTabs.length) return auth.visibleTabs;
   return auth.canEdit ? EDITOR_VISIBLE_TABS : VIEWER_VISIBLE_TABS;
 }
